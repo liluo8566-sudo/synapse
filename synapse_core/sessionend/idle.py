@@ -12,6 +12,8 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+from synapse_core import session_lock
+
 from .tracker import SessionTracker
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,11 @@ class IdleFireLoop:
 
     def _maybe_fire(self, user_id: str, sid: str, now: float) -> bool:
         if not sid:
+            return False
+        # Skip if another channel holds this session (cross-channel resume).
+        owner = session_lock.holder(sid)
+        if owner and owner != self._channel:
+            logger.debug("idle skip sid=%s: held by %s", sid[:8], owner)
             return False
         jsonl = self._find_jsonl(sid)
         if jsonl is None:
