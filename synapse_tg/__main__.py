@@ -159,7 +159,7 @@ def main() -> int:
     ctx = CommandContext(
         state=state,
         swap_provider=loop._swap_provider,
-        close_provider=lambda: loop._swap_provider(None, None),
+        close_provider=loop._close_provider,
         forget_session=loop._forget_session,
         fire_sessionend=_fire_sessionend,
         get_status=loop.get_status,

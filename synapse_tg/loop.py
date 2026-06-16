@@ -134,9 +134,23 @@ class TgLoop:
                 self._provider.cancel()
             except Exception:
                 pass
-            self._provider = None
+        if model is not None:
+            self._state.model = model
+        if sid is not None:
+            self._state.session_id = sid
+        self._provider = self._make_provider()
+        self._provider.spawn()
+        logger.info("swap_provider: respawned (model=%s, sid=%s)", self._state.model, sid)
         self._state.usage_total = {}
         self._state.last_assistant_usage = {}
+
+    def _close_provider(self) -> None:
+        if self._provider:
+            try:
+                self._provider.cancel()
+            except Exception:
+                pass
+            self._provider = None
 
     def _forget_session(self) -> None:
         self._state.session_id = None
@@ -186,7 +200,7 @@ class TgLoop:
         ctx = CommandContext(
             state=self._state,
             swap_provider=self._swap_provider,
-            close_provider=lambda: self._swap_provider(None, None),
+            close_provider=self._close_provider,
             forget_session=self._forget_session,
             persist_state=self._persist_state,
             clear_default_model=self._cfg.default_model,
