@@ -1,0 +1,53 @@
+# Synapse bridge config — copy to ~/.config/synapse-tg/config.toml or synapse-wx/config.toml
+# and fill in your values. Only the sections relevant to your channel are needed.
+
+# ── Telegram ──────────────────────────────────────────
+[bot]
+# Get from @BotFather on Telegram
+token = ""
+
+# ── WeChat ────────────────────────────────────────────
+[user]
+# Your wxid — run `python -m synapse_wx.ilink` to find it after QR login
+target_wxid = ""
+
+[loop]
+poll_interval_sec = 1.0
+
+# ── Shared ────────────────────────────────────────────
+[provider]
+cc_path = "claude"
+# Default cwd for claude sessions started by the bridge
+cwd = ""
+# Enable marrow memory integration (requires marrow install)
+marrow_bridge = false
+# Where claude stores its project data (auto-detected if blank)
+cc_projects_dir = ""
+
+[storage]
+# Runtime data directory. Default: ~/.config/synapse-{channel}/
+data_dir = ""
+
+[persona]
+# Display names in messages
+user_name = ""
+assistant_name = ""
+
+[marrow]
+# Only needed if marrow_bridge = true
+db = "~/.config/marrow/marrow.db"
+sessionend_command = ""
+# Template: "{venv}/python -m marrow.sessionend_async --sid {sid}"
+# {venv} = path to your marrow .venv/bin, {sid} = replaced at runtime
+
+[cwd_presets]
+# Named shortcuts for /cwd N command. Map number to absolute path.
+# 1 = "/path/to/project-a"
+# 2 = "/path/to/project-b"
+
+[alerts]
+# Command to pipe alerts into marrow (optional)
+marrow_repo_cmd = ""
+
+[debug]
+raw_poll_log_until = ""
