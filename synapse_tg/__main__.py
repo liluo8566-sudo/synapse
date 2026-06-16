@@ -177,7 +177,7 @@ def main() -> int:
         persist_state=loop._persist_state,
         audit_writer=_audit_writer,
         replay_for_sid=lambda sid: replay_for_channel(
-            sid=sid, n=5, cwd=state.cc_cwd,
+            sid=sid, n=2, cwd=state.cc_cwd,
         ),
         send_extra_bubbles=_send_extra_bubbles,
         respawn_with_resume=loop.respawn_with_resume,

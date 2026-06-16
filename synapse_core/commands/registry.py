@@ -81,8 +81,9 @@ def _format_resume_picker(rows: list[dict]) -> str:
     """
     out = ["Recent sessions:"]
     for i, r in enumerate(rows, 1):
-        sid = (r.get("sid") or "")[:8]
-        ch = r.get("channel") or "-"
+        sid_full = r.get("sid") or ""
+        sid = sid_full[:8]
+        ch = session_lock.holder(sid_full) or r.get("channel") or "-"
         cwd = r.get("cwd") or ""
         project = cwd.rstrip("/").rsplit("/", 1)[-1] if cwd else ""
         tag = f"[{ch}·{project}]" if project else f"[{ch}]"
