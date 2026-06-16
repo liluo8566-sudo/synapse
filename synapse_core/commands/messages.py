@@ -23,6 +23,14 @@ from typing import Final
 STYLES: Final[tuple[str, ...]] = ("cn", "en")
 DEFAULT_STYLE: Final[str] = "cn"
 
+_overrides: dict[str, dict[str, str]] = {}
+
+
+def load_overrides(table: dict[str, dict[str, str]]) -> None:
+    """Inject ack overrides from config.toml [ack_overrides] section."""
+    _overrides.clear()
+    _overrides.update(table)
+
 # key -> {style -> template}.  Templates use str.format placeholders.
 MESSAGES: Final[dict[str, dict[str, str]]] = {
     # ── /model ──────────────────────────────────────────────────
@@ -300,9 +308,13 @@ def t(
     Unknown style → falls back to DEFAULT_STYLE.
     Missing template var → KeyError from str.format (also loud).
     """
-    entry = MESSAGES[key]
     s = normalize_style(style)
-    template = entry.get(s) or entry.get(DEFAULT_STYLE) or next(iter(entry.values()))
+    override = _overrides.get(key, {}).get(s)
+    if override is not None:
+        template = override
+    else:
+        entry = MESSAGES[key]
+        template = entry.get(s) or entry.get(DEFAULT_STYLE) or next(iter(entry.values()))
     if "{channel_label}" in template:
         if channel_label is None:
             raise KeyError("channel_label")

@@ -49,5 +49,15 @@ sessionend_command = ""
 # Command to pipe alerts into marrow (optional)
 marrow_repo_cmd = ""
 
+[ack_overrides]
+# Override any bridge ack string. Key = message key, value = {style = "text"}.
+# Keys listed in synapse_core/commands/messages.py MESSAGES dict.
+# Supports {placeholder} format vars from the original template.
+# [ack_overrides."provider.dead"]
+# cn = "挂了，烧钱重启中"
+# en = "Provider down."
+# [ack_overrides."clear.ok"]
+# cn = "开张 ({name})"
+
 [debug]
 raw_poll_log_until = ""

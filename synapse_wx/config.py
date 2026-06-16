@@ -49,6 +49,9 @@ class Config:
     # date (inclusive, "YYYY-MM-DD"). Empty = off. Auto-expires after the date.
     raw_poll_log_until: str = ""
 
+    # Ack string overrides from [ack_overrides] — key -> {style -> template}
+    ack_overrides: dict | None = None
+
 
 def load_config(path: Path | None = None) -> Config:
     """Load config.toml; return defaults if absent or malformed."""
@@ -106,4 +109,12 @@ def load_config(path: Path | None = None) -> Config:
                 val = session[field_name]
                 if isinstance(val, str):
                     setattr(cfg, field_name, val)
+    ack = data.get("ack_overrides") or {}
+    if isinstance(ack, dict):
+        cfg.ack_overrides = {
+            str(k): {str(s): str(t) for s, t in v.items() if isinstance(t, str)}
+            for k, v in ack.items()
+            if isinstance(v, dict)
+        }
+
     return cfg

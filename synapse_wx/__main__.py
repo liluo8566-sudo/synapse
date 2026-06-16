@@ -95,6 +95,8 @@ def _wrap_ilink_with_alert_hook(ilink: ILinkClient, alerts: AlertSink) -> None:
 def main() -> int:
     _configure_logging()
     cfg = load_config()
+    if cfg.ack_overrides:
+        cmd_messages.load_overrides(cfg.ack_overrides)
 
     alerts = AlertSink(alerts_dir=ALERTS_DIR, marrow_repo_cmd=cfg.marrow_repo_cmd)
     media_inbound.set_inbound_alert_sink(alerts)

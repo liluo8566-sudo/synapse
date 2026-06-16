@@ -37,6 +37,9 @@ class TgConfig:
     # CWD presets
     cwd_presets: dict = field(default_factory=dict)
 
+    # Ack string overrides from [ack_overrides] — key -> {style -> template}
+    ack_overrides: dict = field(default_factory=dict)
+
 
 def load_config(path: Path | None = None) -> TgConfig:
     """Load config.toml; return defaults if absent or malformed."""
@@ -101,5 +104,13 @@ def load_config(path: Path | None = None) -> TgConfig:
     presets = data.get("cwd_presets") or {}
     if isinstance(presets, dict):
         cfg.cwd_presets = {str(k): str(v) for k, v in presets.items() if isinstance(v, str)}
+
+    ack = data.get("ack_overrides") or {}
+    if isinstance(ack, dict):
+        cfg.ack_overrides = {
+            str(k): {str(s): str(t) for s, t in v.items() if isinstance(t, str)}
+            for k, v in ack.items()
+            if isinstance(v, dict)
+        }
 
     return cfg

@@ -41,6 +41,8 @@ def _configure_logging() -> None:
 def main() -> int:
     _configure_logging()
     cfg = load_config()
+    if cfg.ack_overrides:
+        messages.load_overrides(cfg.ack_overrides)
 
     if not cfg.bot_token:
         print("bot_token missing — set [bot] token in config.toml", file=sys.stderr)
