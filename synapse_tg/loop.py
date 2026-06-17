@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from telegram import Bot, Update
 from telegram.ext import ContextTypes
@@ -424,8 +424,17 @@ class TgLoop:
                     elif bt == "thinking":
                         if block.get("thinking"):
                             thinking_chunks.append(block["thinking"])
+                usage = msg.get("usage")
+                if isinstance(usage, dict):
+                    self._merge_usage(usage)
+                    snap = {k: v for k, v in usage.items() if isinstance(v, int)}
+                    if snap:
+                        self._state.last_assistant_usage = snap
 
             elif t_type == "result":
+                usage = ev.get("usage")
+                if isinstance(usage, dict):
+                    self._merge_usage(usage)
                 break
 
         self._death_count = 0
@@ -433,6 +442,11 @@ class TgLoop:
         thinking = "\n".join(thinking_chunks)
 
         return full_text, thinking, stream_msg_id
+
+    def _merge_usage(self, usage: dict[str, Any]) -> None:
+        for k, v in usage.items():
+            if isinstance(v, int):
+                self._state.usage_total[k] = self._state.usage_total.get(k, 0) + v
 
     def idle_close_provider(self, sid: str) -> None:
         """Called by IdleFireLoop pre_spawn_hook. Graceful close if sids match."""
