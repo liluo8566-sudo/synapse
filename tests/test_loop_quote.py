@@ -306,8 +306,8 @@ def test_no_quote_tag_all_bubbles_plain(env) -> None:
     """Reply with no <quote> tag → no fake-quote bubble."""
     ilink = FakeILink([[_simple_msg("ignored")]])
     clock = FakeClock()
-    loop = _build_loop(env, ilink, clock, reply="line one\nline two")
-    _spawn(loop, "line one\nline two")
+    loop = _build_loop(env, ilink, clock, reply="line one\n\nline two")
+    _spawn(loop, "line one\n\nline two")
     loop.tick()
     clock.advance(6.0)
     loop.maybe_flush()

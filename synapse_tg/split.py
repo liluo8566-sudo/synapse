@@ -16,6 +16,7 @@ _CLOSE_BRACKETS = "」』）)】〕]》〉"
 _CLOSING_TRAILERS = _CLOSE_BRACKETS + "\"'"
 
 DEFAULT_LIMIT = 4096
+_PARA_SOFT_CAP = 500
 
 
 def _is_sentence_end(line: str, i: int) -> bool:
@@ -115,16 +116,35 @@ def _split_long_line(line: str, limit: int) -> list[str]:
 def split_for_tg(text: str, limit: int = DEFAULT_LIMIT) -> list[str]:
     """Split assistant text into Telegram messages (<= limit chars each).
 
-    Paragraph boundaries first, sentence boundaries on overflow, hard cut last.
+    Double-newline boundaries first (paragraph = one bubble), then sentence
+    boundaries on overflow, hard cut last.
     """
     if not text:
         return []
+    soft = min(_PARA_SOFT_CAP, limit)
     chunks: list[str] = []
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line:
+    for para in re.split(r"\n{2,}", text):
+        para = para.strip()
+        if not para:
             continue
-        chunks.extend(_split_long_line(line, limit))
+        if len(para) <= soft:
+            chunks.append(para)
+            continue
+        # Over soft cap — split on internal \n, merge lines up to soft cap
+        lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
+        buf = ""
+        for ln in lines:
+            if not buf:
+                buf = ln
+                continue
+            candidate = buf + "\n" + ln
+            if len(candidate) <= soft:
+                buf = candidate
+            else:
+                chunks.extend(_split_long_line(buf, soft))
+                buf = ln
+        if buf:
+            chunks.extend(_split_long_line(buf, soft))
     return [c for c in chunks if c]
 
 

@@ -104,9 +104,11 @@ def test_split_for_wechat_strips_media_tags() -> None:
 
 
 def test_split_for_wechat_unchanged_for_pure_text() -> None:
-    # Direct regression: existing behavior intact.
+    # Single \n keeps lines in one bubble; \n\n splits.
     out = split_for_wechat("line one\nline two")
-    assert out == ["line one", "line two"]
+    assert out == ["line one\nline two"]
+    out2 = split_for_wechat("line one\n\nline two")
+    assert out2 == ["line one", "line two"]
 
 
 def test_split_for_wechat_media_only_returns_empty_text() -> None:

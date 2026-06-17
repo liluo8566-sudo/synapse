@@ -35,6 +35,17 @@ from synapse_core.usage import UsageClient
 
 logger = logging.getLogger(__name__)
 
+WX_BUBBLE_FORMAT_PROMPT = (
+    "Reply format (IM bubbles):\n"
+    "- \\n = line break within the same bubble. \\n\\n = new bubble.\n"
+    "- Casual chat: short bubbles, <=50 chars each.\n"
+    "- Q&A / coding / in-depth: longer OK, <=200 chars per bubble.\n"
+    "- Long bubbles use \\n for line breaks. Prioritize readability.\n"
+    "- Max 10 bubbles per reply, total <=2000 chars.\n"
+    "- Do not read or edit code unless explicitly asked.\n"
+    "- Free to search docs and web."
+)
+
 CHANNEL = "wx"
 CHANNEL_LABEL = "CC-WX"
 CONFIG_DIR = Path.home() / ".config" / "synapse-wx"
@@ -188,7 +199,7 @@ def main() -> int:
             cwd=state.cc_cwd,
             effort_level=state.effort_level,
             stderr_log=CC_STDERR_LOG,
-            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT],
+            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, WX_BUBBLE_FORMAT_PROMPT],
             marrow_bridge=True,
             channel=CHANNEL,
         )

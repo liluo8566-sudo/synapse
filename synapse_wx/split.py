@@ -66,6 +66,7 @@ _LIST_ITEM = re.compile(r"^\s*[-·*]\s+")
 # single bubble; over this we fall back to sentence-split + accrete back up
 # to the same ceiling. Tuned to keep bubbles within ~6-8 wx lines.
 DEFAULT_HARD_MAX = 200
+MAX_WX_BUBBLES = 10
 
 # /thinking: emit cc's plaintext thinking as ONE wx bubble prefixed 🧠.
 # Test-drive: no splitting; we want to see how wx renders a long single
@@ -283,14 +284,39 @@ def split_for_wechat(
 
 def _text_to_bubbles(flat: str, hard_max: int) -> list[str]:
     bubbles: list[str] = []
-    for line in flat.split("\n"):
-        line = line.strip()
-        if not line:
+    for para in re.split(r"\n{2,}", flat):
+        para = para.strip()
+        if not para:
             continue
-        if _is_list_item(line):
-            bubbles.append(line)
+        lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
+        has_list = any(_is_list_item(ln) for ln in lines)
+        if not has_list and len(para) <= hard_max:
+            bubbles.append(para)
             continue
-        bubbles.extend(_split_long_line(line, hard_max))
+        # Has list items or exceeds cap — process line by line
+        buf = ""
+        for ln in lines:
+            if _is_list_item(ln):
+                if buf:
+                    bubbles.extend(_split_long_line(buf, hard_max))
+                    buf = ""
+                bubbles.append(ln)
+                continue
+            if not buf:
+                buf = ln
+                continue
+            candidate = buf + "\n" + ln
+            if len(candidate) <= hard_max:
+                buf = candidate
+            else:
+                bubbles.extend(_split_long_line(buf, hard_max))
+                buf = ln
+        if buf:
+            bubbles.extend(_split_long_line(buf, hard_max))
+    # Cap text bubbles — merge trailing if over limit
+    while len(bubbles) > MAX_WX_BUBBLES:
+        last = bubbles.pop()
+        bubbles[-1] = bubbles[-1] + "\n" + last
     return [b for b in bubbles if b]
 
 

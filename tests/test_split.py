@@ -16,8 +16,12 @@ def test_short_text_single_bubble() -> None:
 
 
 def test_newline_split_one_per_line() -> None:
+    # Single \n within a paragraph keeps lines together (one bubble).
     out = split_for_wechat("line one\nline two\nline three")
-    assert out == ["line one", "line two", "line three"]
+    assert out == ["line one\nline two\nline three"]
+    # Double \n splits into separate bubbles.
+    out2 = split_for_wechat("line one\n\nline two\n\nline three")
+    assert out2 == ["line one", "line two", "line three"]
 
 
 def test_short_english_paragraph_stays_whole() -> None:
