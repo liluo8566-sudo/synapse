@@ -36,6 +36,11 @@ from synapse_core.usage import UsageClient
 
 logger = logging.getLogger(__name__)
 
+WX_STICKER_PROMPT = (
+    "WeChat cannot display animated GIFs as stickers. "
+    "Always call sticker_search with animated=false so only static stickers are returned."
+)
+
 WX_BUBBLE_FORMAT_PROMPT = (
     "Reply format (IM bubbles):\n"
     "- \\n = line break within the same bubble. \\n\\n = new bubble.\n"
@@ -197,7 +202,7 @@ def main() -> int:
             cwd=state.cc_cwd,
             effort_level=state.effort_level,
             stderr_log=CC_STDERR_LOG,
-            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, WX_BUBBLE_FORMAT_PROMPT],
+            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, WX_STICKER_PROMPT, WX_BUBBLE_FORMAT_PROMPT],
             marrow_bridge=True,
             channel=CHANNEL,
         )
