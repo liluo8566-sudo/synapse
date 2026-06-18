@@ -176,8 +176,9 @@ class TgLoop:
     def _forget_session(self) -> None:
         self._state.session_id = None
         self._buffer = InboundBuffer()
-        if self._sessions is not None and self._pending_chat_id is not None:
-            self._sessions.forget(str(self._pending_chat_id))
+        if self._sessions is not None:
+            for cid in list(self._sessions.snapshot()):
+                self._sessions.forget(cid)
 
     def _record_effort(self, sid: str, effort: str) -> None:
         try:
