@@ -21,7 +21,7 @@ from telegram import Bot, Update
 from telegram.ext import ContextTypes
 
 from synapse_core import bridge_state_store
-from synapse_core.marrow_session import get_session_created_at
+from synapse_core.marrow_session import get_session_created_at, get_session_effort
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
@@ -177,6 +177,15 @@ class TgLoop:
         if self._sessions is not None and self._pending_chat_id is not None:
             self._sessions.forget(str(self._pending_chat_id))
 
+    def _record_effort(self, sid: str, effort: str) -> None:
+        try:
+            subprocess.run(
+                ["mw", "add-session", "--sid", sid, "--effort", effort],
+                capture_output=True, timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("record_effort failed: %s", e)
+
     _MARROW_PY = os.environ.get(
         "MARROW_PYTHON",
         str(Path.home() / "CC-Lab/marrow/.venv/bin/python"),
@@ -225,6 +234,10 @@ class TgLoop:
             clear_default_model=self._cfg.default_model,
             commands_doc_path=Path(__file__).resolve().parents[1] / "COMMANDS.md",
             fetch_diary=self._make_fetch_diary(),
+            record_effort=self._record_effort,
+            resolve_session_effort=lambda sid: get_session_effort(
+                self._cfg.session_get_effort_command, sid
+            ),
         )
         return Registry(ctx)
 

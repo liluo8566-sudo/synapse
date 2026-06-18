@@ -225,6 +225,9 @@ class CommandContext:
     resolve_session_cwd: Callable[[str], str | None] = field(
         default_factory=lambda: lambda _sid: None
     )
+    resolve_session_effort: Callable[[str], str | None] = field(
+        default_factory=lambda: lambda _sid: None
+    )
     record_effort: Callable[[str, str], None] = field(
         default_factory=lambda: lambda _sid, _effort: None
     )
@@ -541,7 +544,9 @@ class Registry:
             state.cc_cwd = target_cwd
             self._ctx.cc_cwd = target_cwd
             cwd_ack = self._t("resume.cwd_switched", dir=os.path.basename(target_cwd))
-        # /resume inherits the persisted effort_level — do NOT touch it here.
+        target_effort = self._ctx.resolve_session_effort(sid)
+        if target_effort:
+            state.effort_level = target_effort
         self._ctx.swap_provider(model, sid)
         state.model = model
         state.session_id = sid

@@ -34,6 +34,8 @@ class Config:
     session_list_recent_command: str = "mw list-recent-sessions --limit 10"
     # cwd resolver: prints the cwd for a sid, or empty line if unknown.
     session_cwd_command: str = "mw get-session-cwd --sid {sid}"
+    # effort resolver: prints the stored effort for a sid, or empty on miss.
+    session_get_effort_command: str = "mw get-session-effort --sid {sid}"
     # created_at resolver: prints ISO timestamp for a sid, or empty on miss.
     session_created_command: str = "mw get-session-created --sid {sid}"
     # B1: model /clear lands on (canonical id, "[1m]" suffix kept).
@@ -101,6 +103,7 @@ def load_config(path: Path | None = None) -> Config:
             "session_get_model_command",
             "session_list_recent_command",
             "session_cwd_command",
+            "session_get_effort_command",
             "session_created_command",
             "clear_default_model",
             "cc_projects_dir",

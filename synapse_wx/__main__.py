@@ -336,6 +336,15 @@ def main() -> int:
         except Exception:
             return (None, None)
 
+    def _record_effort(sid: str, effort: str) -> None:
+        try:
+            subprocess.run(
+                ["mw", "add-session", "--sid", sid, "--effort", effort],
+                capture_output=True, timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("record_effort failed: %s", e)
+
     cmd_ctx = CommandContext(
         state=state,
         swap_provider=main_loop.swap_provider,
@@ -366,6 +375,10 @@ def main() -> int:
         persist_state=_save_state,
         usage_client=usage_client.fetch,
         fetch_diary=_fetch_diary,
+        record_effort=_record_effort,
+        resolve_session_effort=lambda sid: marrow_session.get_session_effort(
+            cfg.session_get_effort_command, sid
+        ),
     )
     main_loop.set_registry(Registry(cmd_ctx))
 

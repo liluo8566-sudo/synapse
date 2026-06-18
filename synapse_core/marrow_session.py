@@ -97,6 +97,23 @@ def get_session_created_at(session_created_command: str, sid: str) -> str | None
     return out or None
 
 
+def get_session_effort(session_get_effort_command: str, sid: str) -> str | None:
+    if not sid:
+        return None
+    cmd = _format(session_get_effort_command, sid=sid)
+    if cmd is None:
+        return None
+    try:
+        r = subprocess.run(cmd, check=False, capture_output=True, timeout=5.0, text=True)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("get_session_effort subprocess failed: %s", e)
+        return None
+    if r.returncode != 0:
+        return None
+    out = (r.stdout or "").strip()
+    return out or None
+
+
 def list_recent_sessions(
     session_list_recent_command: str,
     cc_projects_dir: str | Path | None,
@@ -128,6 +145,7 @@ def list_recent_sessions(
         sid, model, channel, cwd = parts[0], parts[1], parts[2], parts[3]
         last_active = parts[4]
         title = parts[5] if len(parts) > 5 else ""
+        effort = parts[6] if len(parts) > 6 else ""
         model_clean = model if model != "-" else ""
         if not model_clean and sid:
             try:
@@ -143,6 +161,7 @@ def list_recent_sessions(
                 "cwd": cwd,
                 "last_active": last_active,
                 "title": title,
+                "effort": effort,
             }
         )
     return out
