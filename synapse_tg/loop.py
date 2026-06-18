@@ -166,6 +166,9 @@ class TgLoop:
             created = get_session_created_at(self._cfg.session_created_command, sid)
             if created:
                 self._session_created_at = created
+        else:
+            from datetime import datetime, timezone
+            self._session_created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._state.usage_total = {}
         self._state.last_assistant_usage = {}
 

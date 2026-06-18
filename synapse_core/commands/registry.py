@@ -308,9 +308,17 @@ class Registry:
                 self._ctx.close_provider()
                 self._ctx.forget_session()
                 state.session_id = None
-                state.model = self._ctx.clear_default_model or state.model
+                default_model = self._ctx.clear_default_model or state.model
+                state.model = default_model
+                self._ctx.swap_provider(default_model, None)
                 self._ctx.persist_state()
-                return ("handled", self._t("session.claimed_away", channel=owner))
+                try:
+                    self._ctx.send_extra_bubbles(
+                        [self._t("session.claimed_away", channel=owner)]
+                    )
+                except Exception:
+                    pass
+                return ("forward", None)
 
         return ("forward", None)
 
