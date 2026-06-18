@@ -9,6 +9,7 @@ import shlex
 import signal
 import subprocess
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from synapse_core import bridge_state_store, marrow_session
@@ -149,17 +150,7 @@ def main() -> int:
         state.model = cfg.clear_default_model
 
     def _save_state() -> None:
-        bridge_state_store.save(
-            BRIDGE_STATE_PATH,
-            {
-                "effort_level": state.effort_level,
-                "thinking_on": state.thinking_on,
-                "quote_on": state.quote_on,
-                "voice_style": state.voice_style,
-                "cc_cwd": state.cc_cwd,
-                "session_id": state.session_id,
-            },
-        )
+        bridge_state_store.save(BRIDGE_STATE_PATH, asdict(state))
 
     sessions = SessionTracker(state_path=SESSION_STATE_PATH)
     # B11: pre_spawn_hook bound below once main_loop exists. We construct the
