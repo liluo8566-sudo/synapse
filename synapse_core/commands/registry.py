@@ -560,6 +560,11 @@ class Registry:
 
     def _handle_stop(self) -> str:
         state = self._ctx.state
+        if state.session_id:
+            target_cwd = self._ctx.resolve_session_cwd(state.session_id)
+            if target_cwd and os.path.isdir(target_cwd) and target_cwd != state.cc_cwd:
+                state.cc_cwd = target_cwd
+                self._ctx.cc_cwd = target_cwd
         self._ctx.swap_provider(state.model, state.session_id)
         return self._t("stop.ok")
 
