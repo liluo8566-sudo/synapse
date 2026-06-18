@@ -157,6 +157,7 @@ def main() -> int:
                 "quote_on": state.quote_on,
                 "voice_style": state.voice_style,
                 "cc_cwd": state.cc_cwd,
+                "session_id": state.session_id,
             },
         )
 
