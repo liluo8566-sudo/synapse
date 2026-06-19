@@ -486,6 +486,7 @@ class TgLoop:
             except Exception:
                 pass
             self._provider = None
+            self._user_initiated_close = False
         self._death_count = 0
         self._state.session_id = sid
         if model:
