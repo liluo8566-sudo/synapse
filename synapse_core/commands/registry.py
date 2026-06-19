@@ -443,16 +443,15 @@ class Registry:
         # effort_level and thinking_on persist across /clear — user prefs
         # stick, only model resets (0614).
         default_model = self._ctx.clear_default_model or state.model
-        # Fire sessionend BEFORE close+swap so the old sid actually goes through
-        # marrow's LLM pipeline (lifecycle:end, affect, digest). cc's
-        # SessionEnd hook in bridge mode only writes archive + bridge_owns
-        # marker; without this popen the sid stays orphaned forever.
+        # Close cc FIRST so SessionEnd hook archives events into DB, then
+        # spawn sessionend_async — it needs the archived events (user_count).
         old_sid = state.session_id
         if old_sid:
             try:
                 replay_bookmark.save(old_sid, self._ctx.channel or "", self._ctx.cc_cwd)
             except Exception:
                 pass
+            self._ctx.close_provider()
             try:
                 self._ctx.fire_sessionend(old_sid)
             except Exception:  # noqa: BLE001 — never block /clear
@@ -496,12 +495,14 @@ class Registry:
     def _resume_sid(self, sid: str) -> str:
         state = self._ctx.state
         # If this bridge has a different active session, clear it first.
+        # Close cc before fire_sessionend so events are archived.
         old_sid = state.session_id
         if old_sid and old_sid != sid:
             try:
                 replay_bookmark.save(old_sid, self._ctx.channel or "", self._ctx.cc_cwd)
             except Exception:
                 pass
+            self._ctx.close_provider()
             try:
                 self._ctx.fire_sessionend(old_sid)
             except Exception:
@@ -802,10 +803,10 @@ class Registry:
         # so the new session starts clean. effort_level + thinking_on
         # persist (0614).
         default_model = self._ctx.clear_default_model or state.model
-        # Fire sessionend for the old sid so marrow's LLM pipeline runs before
-        # we swap it out. Same rationale as _handle_clear.
+        # Close cc before fire_sessionend so events are archived first.
         old_sid = state.session_id
         if old_sid:
+            self._ctx.close_provider()
             try:
                 self._ctx.fire_sessionend(old_sid)
             except Exception:  # noqa: BLE001 — never block /cwd
