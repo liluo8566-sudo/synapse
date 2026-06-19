@@ -595,10 +595,13 @@ class Registry:
         """Reverse a prior ``mm-`` for the current session.
 
         Writes a new pair of rows; marrow's latest-wins reader picks them up.
+        Also writes reset:mm_plus so bridge_owns gate lets SessionEnd
+        spawn sessionend_async on /clear.
         """
         sid = self._ctx.state.session_id
         if not sid:
             return self._t("mm.clear_no_sess")
+        self._ctx.audit_writer("sessionend_extract", sid, "reset:mm_plus")
         self._ctx.audit_writer("manual_skip", sid, "skip_cleared")
         self._ctx.audit_writer("session_block", sid, "cleared")
         return self._t("mm.clear")
