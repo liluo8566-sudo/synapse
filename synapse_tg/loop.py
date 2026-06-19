@@ -162,7 +162,7 @@ class TgLoop:
     def _close_provider(self) -> None:
         if self._provider:
             try:
-                self._provider.cancel()
+                self._provider.close()
             except Exception:
                 pass
             self._provider = None
