@@ -499,26 +499,19 @@ class TgLoop:
             self._user_initiated_close = False
         self._death_count = 0
 
-        # Check if sid still exists in ~/.claude/sessions index.
-        # If process was killed, the PID json is gone, so cc --resume will fail.
+        # Check if the session jsonl still exists on disk. The session
+        # index (~/.claude/sessions/*.json) is cleaned up on graceful exit,
+        # so checking it always gives false after close(). The jsonl file
+        # is what cc --resume actually needs.
         use_resume = True
-        sessions_dir = Path.home() / ".claude" / "sessions"
-        if sessions_dir.exists():
-            found = False
-            try:
-                for json_file in sessions_dir.glob("*.json"):
-                    try:
-                        data = json.loads(json_file.read_text())
-                        if data.get("sessionId") == sid:
-                            found = True
-                            break
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.warning("failed to check session index: %s", e)
-            if not found:
-                logger.warning("session %s not in ~/.claude/sessions, fallback to --create", sid)
+        try:
+            from synapse_core.jsonl_edit import _jsonl_path
+            jsonl = _jsonl_path(sid, cwd=self._cfg.cwd and str(self._cfg.cwd), projects_root=None)
+            if not jsonl:
+                logger.warning("session %s jsonl not found, fallback to --create", sid[:8])
                 use_resume = False
+        except Exception as e:
+            logger.warning("failed to locate session jsonl: %s", e)
 
         self._state.session_id = sid
         if model:
