@@ -247,6 +247,8 @@ def main() -> int:
     app.add_handler(MessageHandler(filters.Sticker.ALL, loop.on_sticker))
     app.add_handler(MessageHandler(filters.VIDEO, loop.on_video))
     app.job_queue.run_repeating(loop.check_flush, interval=0.5, first=0.5)
+    app.job_queue.run_repeating(loop.check_heartbeat, interval=15, first=10)
+    app.job_queue.run_repeating(loop.check_book_signal, interval=5, first=5)
 
     logger.info("synapse-tg starting (long-poll)")
     try:

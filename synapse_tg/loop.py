@@ -64,6 +64,18 @@ _STREAM_EDIT_CHARS = 200      # or every N new chars, whichever comes first
 # Strip media tags from streaming preview — handled after completion
 _MEDIA_TAG_RE = re.compile(r'<(image|gif|video|file)\s+path="[^"]*"\s*/?>', re.IGNORECASE)
 
+
+def _chat_meta(msg) -> str:
+    """Return a metadata prefix for group messages so Claude can tell who sent what.
+    Private messages return empty string (no prefix needed)."""
+    chat = msg.chat
+    if chat.type in ("group", "supergroup"):
+        user = msg.from_user
+        name = user.first_name if user else "?"
+        title = chat.title or str(chat.id)
+        return f"[群:{title} from:{name}] "
+    return ""
+
 TG_MEDIA_SYSTEM_PROMPT = (
     "To send media (photo/gif/video/file), put a tag in your reply, one tag "
     'per file: <image path="/abs/p.jpg"> <gif path="/abs/a.gif"> '
@@ -551,6 +563,68 @@ class TgLoop:
             if self._turn_user_id is not None and user_id == self._turn_user_id:
                 self._same_sender_interrupted = True
 
+    _HB_SIGNAL = Path.home() / ".heartbeat" / "signal.json"
+
+    async def check_heartbeat(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._HB_SIGNAL.exists():
+            return
+        if self._pending_chat_id is None:
+            return
+        try:
+            data = json.loads(self._HB_SIGNAL.read_text())
+            self._HB_SIGNAL.unlink(missing_ok=True)
+        except Exception:
+            return
+        mem = data.get("memory", {})
+        anomalies = data.get("anomalies", [])
+        parts = [
+            "[system:heartbeat] Heartbeat fired. "
+            "You felt like checking in on 霜霜 — ask what she's up to, "
+            "share a small thought, be warm and natural. "
+            "Keep it short (1-2 bubbles). Don't mention 'heartbeat' or 'system'.",
+        ]
+        status_line = (
+            f"Mac status: mem {mem.get('used_gb', '?')}/{mem.get('total_gb', '?')}GB, "
+            f"pressure {mem.get('pressure', '?')}, "
+            f"swap {data.get('swap_gb', '?')}GB, "
+            f"CPU {data.get('cpu_percent', '?')}%"
+        )
+        if anomalies:
+            warns = "; ".join(
+                f"{a['name']} PID {a['pid']} using {a['mem_gb']}GB"
+                for a in anomalies
+            )
+            parts.append(
+                f"⚠️ {status_line}. ANOMALY: {warns}. "
+                "Mention this naturally — something like 'btw your Mac is running hot'."
+            )
+        else:
+            parts.append(
+                f"System healthy: {status_line}. No issues — don't mention the Mac."
+            )
+        self._buffer.add("\n".join(parts))
+        logger.info("heartbeat injected (anomalies=%d)", len(anomalies))
+
+    _BOOK_SIGNAL = Path.home() / ".shared-reading" / "signal.json"
+
+    async def check_book_signal(self, context) -> None:
+        if not self._BOOK_SIGNAL.exists():
+            return
+        if self._pending_chat_id is None:
+            return
+        try:
+            data = json.loads(self._BOOK_SIGNAL.read_text())
+            self._BOOK_SIGNAL.unlink(missing_ok=True)
+            prompt = data.get("prompt", "")
+            if prompt:
+                self._buffer.add(prompt)
+        except Exception as e:
+            logger.warning("book signal read failed: %s", e)
+            try:
+                self._BOOK_SIGNAL.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or update.message.text is None:
             return
@@ -583,7 +657,9 @@ class TgLoop:
         if reply and reply.text:
             quoted = reply.text[:80]
             quote_prefix = f'[quoting: "{quoted}"]\n'
-        self._buffer.add(f"{quote_prefix}{text}" if quote_prefix else text)
+        meta = _chat_meta(update.message)
+        full = f"{meta}{quote_prefix}{text}" if meta else f"{quote_prefix}{text}"
+        self._buffer.add(full)
         logger.debug("buffered text: %r (len=%d)", text[:80], len(self._buffer))
         if update.message:
             self._msg_id_cache[update.message.message_id] = text
@@ -599,8 +675,9 @@ class TgLoop:
         if paths:
             instruction = build_read_instruction(paths)
             caption = (update.message.caption or "").strip()
+            cmeta = _chat_meta(update.message)
             body = f"{caption}\n{instruction}" if caption else instruction
-            self._buffer.add(body)
+            self._buffer.add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered photo: %s", paths)
 
     async def on_animation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -612,8 +689,9 @@ class TgLoop:
         if path:
             instruction = build_read_instruction([path])
             caption = (update.message.caption or "").strip()
+            cmeta = _chat_meta(update.message)
             body = f"{caption}\n{instruction}" if caption else instruction
-            self._buffer.add(body)
+            self._buffer.add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered animation: %s", path)
 
     async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -625,8 +703,9 @@ class TgLoop:
         if path:
             instruction = build_read_instruction([path])
             caption = (update.message.caption or "").strip()
+            cmeta = _chat_meta(update.message)
             body = f"{caption}\n{instruction}" if caption else instruction
-            self._buffer.add(body)
+            self._buffer.add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered document: %s", path)
 
     async def on_sticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -637,9 +716,10 @@ class TgLoop:
         path = await materialize_sticker(context.bot, update.message, self._cfg.data_dir)
         if path:
             stk = update.message.sticker
-            meta = f"[sticker: emoji={stk.emoji or '?'}, set={stk.set_name or 'none'}]"
+            cmeta = _chat_meta(update.message)
+            stk_meta = f"[sticker: emoji={stk.emoji or '?'}, set={stk.set_name or 'none'}]"
             instruction = build_read_instruction([path])
-            self._buffer.add(f"{meta}\n{instruction}")
+            self._buffer.add(f"{cmeta}{stk_meta}\n{instruction}" if cmeta else f"{stk_meta}\n{instruction}")
             logger.debug("buffered sticker: %s", path)
 
     async def on_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -651,8 +731,9 @@ class TgLoop:
         if path:
             instruction = build_read_instruction([path])
             caption = (update.message.caption or "").strip()
+            cmeta = _chat_meta(update.message)
             body = f"{caption}\n{instruction}" if caption else instruction
-            self._buffer.add(body)
+            self._buffer.add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered video: %s", path)
 
     async def check_flush(self, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -711,22 +792,20 @@ class TgLoop:
             logger.info("same sender new inbound during streaming — delivering reply, new messages queued")
         self._turn_user_id = None
 
-        if not response and not thinking:
+        if not response:
             return
 
         # Thinking: send as expandable blockquote after main response
+        # Only when there IS a response — prevents bot-to-bot thinking loops
         if thinking and self._state.thinking_on:
             truncated = thinking[:2000]
             if len(thinking) > 2000:
                 truncated += f"\n... ({len(thinking)} chars total)"
-            think_html = f"<blockquote expandable>\U0001f9e0 {gfm_to_tg_html(truncated)}</blockquote>"
+            think_html = f"<tg-spoiler><blockquote expandable>\U0001f4ad\n{gfm_to_tg_html(truncated)}</blockquote></tg-spoiler>"
             try:
                 await bot.send_message(chat_id=chat_id, text=think_html, parse_mode="HTML")
             except Exception:
                 pass
-
-        if not response:
-            return
 
         reply_to_id = None
         quote_match = re.search(r"<quote>(.*?)</quote>", response, re.DOTALL)

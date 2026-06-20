@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -358,8 +359,30 @@ class MainLoop:
         self._announce_target = target_wxid
         self._announce_text = text
 
+    _BOOK_SIGNAL = Path.home() / ".shared-reading" / "signal.json"
+
+    def _check_book_signal(self) -> None:
+        if not self._BOOK_SIGNAL.exists():
+            return
+        if not hasattr(self, '_last_from_wxid') or self._last_from_wxid is None:
+            return
+        try:
+            data = json.loads(self._BOOK_SIGNAL.read_text())
+            self._BOOK_SIGNAL.unlink(missing_ok=True)
+            prompt = data.get("prompt", "")
+            if prompt:
+                with self._state_lock:
+                    self._buffer.add(prompt)
+        except Exception as e:
+            logger.warning("book signal read failed: %s", e)
+            try:
+                self._BOOK_SIGNAL.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     def tick(self) -> None:
         """One inbound poll: route bridge commands; buffer the rest for the provider."""
+        self._check_book_signal()
         try:
             msgs = self._ilink.poll_messages()
         except Exception as e:
