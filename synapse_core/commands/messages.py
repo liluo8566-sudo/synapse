@@ -43,8 +43,8 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
         "en": "Already {name}",
     },
     "model.usage": {
-        "cn": "查无此机，请重新输入：\n/model <5|4.6|4.7|4.8|fable|sonnet|haiku|opus|claude-...>",
-        "en": "Command: /model <5|4.6|4.7|4.8|fable|sonnet|haiku|opus|claude-...>",
+        "cn": "查无此机，请重新输入：\n/model <{aliases}|claude-...>",
+        "en": "Command: /model <{aliases}|claude-...>",
     },
 
     # ── /clear ──────────────────────────────────────────────────
