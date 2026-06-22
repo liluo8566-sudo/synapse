@@ -419,6 +419,9 @@ class TgLoop:
                                         preview_frozen = True
                                     chars_since_edit += len(preview_chunk)
 
+                                    if not accumulated.strip():
+                                        continue
+
                                     if stream_msg_id is None:
                                         typing.stop()
                                         sent = await bot.send_message(

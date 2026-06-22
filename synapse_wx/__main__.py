@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shlex
 import signal
 import subprocess
@@ -23,6 +22,7 @@ from synapse_core.commands.registry import CommandContext, Registry
 from .config import DEFAULT_CC_CWD, load_config
 from synapse_core.debounce import InboundBuffer
 from synapse_core.health import HealthGate
+from synapse_core.logging_config import configure_logging
 from .ilink import ILinkClient
 from .ilink.rawlog import RawPollLogger
 from .ilink.retry import DEFAULT_RETRYABLE, with_retry
@@ -69,16 +69,6 @@ SESSIONEND_ERR_LOG = LOG_DIR / "synapse-wx-sessionend.err.log"
 CC_STDERR_LOG = LOG_DIR / "synapse-wx-cc-stderr.log"
 
 
-def _configure_logging() -> None:
-    level_name = os.environ.get("SYNAPSE_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-
 def _wrap_ilink_with_alert_hook(ilink: ILinkClient, alerts: AlertSink) -> None:
     """Reapply the retry decorator on poll_messages/send_text so alerts.write fires
     after exhausted retries. The original decorator was applied without a hook;
@@ -112,7 +102,7 @@ def _wrap_ilink_with_alert_hook(ilink: ILinkClient, alerts: AlertSink) -> None:
 
 
 def main() -> int:
-    _configure_logging()
+    configure_logging(Path.home() / "Library/Logs/synapse-wx.log")
     cfg = load_config()
     if cfg.ack_overrides:
         cmd_messages.load_overrides(cfg.ack_overrides)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import shlex
 import subprocess
 import sys
@@ -17,6 +16,7 @@ from synapse_core.commands import marrow_audit, messages
 from synapse_core.commands.handlers import replay_for_channel
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.health import HealthGate
+from synapse_core.logging_config import configure_logging
 from synapse_core.sessionend.idle import IdleFireLoop
 from synapse_core.sessionend.tracker import SessionTracker
 from synapse_core.usage import UsageClient
@@ -29,17 +29,8 @@ logger = logging.getLogger(__name__)
 CHANNEL = "tg"
 
 
-def _configure_logging() -> None:
-    level = getattr(logging, os.environ.get("SYNAPSE_LOG_LEVEL", "INFO").upper(), logging.INFO)
-    logging.basicConfig(
-        level=level,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-
 def main() -> int:
-    _configure_logging()
+    configure_logging(Path.home() / "Library/Logs/synapse-tg.log")
     cfg = load_config()
     if cfg.ack_overrides:
         messages.load_overrides(cfg.ack_overrides)
