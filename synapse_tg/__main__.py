@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, MessageHandler, filters
 
 from synapse_core import marrow_session
@@ -242,6 +243,14 @@ def main() -> int:
     app.add_handler(MessageHandler(filters.Sticker.ALL, loop.on_sticker))
     app.add_handler(MessageHandler(filters.VIDEO, loop.on_video))
     app.job_queue.run_repeating(loop.check_flush, interval=0.5, first=0.5)
+
+    async def _error_handler(update, context):
+        if isinstance(context.error, (NetworkError, TimedOut)):
+            logger.warning("transient network error (auto-retry): %s", context.error)
+            return
+        logger.exception("unhandled error", exc_info=context.error)
+
+    app.add_error_handler(_error_handler)
 
     logger.info("synapse-tg starting (long-poll)")
     try:
