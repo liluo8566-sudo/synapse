@@ -347,7 +347,7 @@ class QiduParser:
             f"## 第一步: 下载文件\n"
             f"curl -H \"Authorization: Bearer {token}\" {api_base}/books/{bid}/file -o /tmp/qidu-parse/{filename}\n\n"
             f"## 第二步: 调用提取工具\n"
-            f"python {extract_script} /tmp/qidu-parse/{filename} {fmt} /tmp/qidu-parse/{bid}/\n"
+            f"python3 {extract_script} /tmp/qidu-parse/{filename} {fmt} /tmp/qidu-parse/{bid}/\n"
             f"这会生成:\n"
             f"- /tmp/qidu-parse/{bid}/text.txt (纯文本)\n"
             f"- /tmp/qidu-parse/{bid}/cover.jpg (封面, 可能没有)\n"
