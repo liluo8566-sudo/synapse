@@ -237,6 +237,19 @@ def main() -> int:
         logger.info("boot resume (persisted): sid=%s", state.session_id)
 
     # --- start ---
+    qidu_parser = None
+    if cfg.qidu_api_base and cfg.qidu_token:
+        from synapse_core.qidu_parser import QiduParser
+        qidu_parser = QiduParser(
+            api_base=cfg.qidu_api_base,
+            token=cfg.qidu_token,
+            poll_interval=cfg.qidu_poll_interval,
+            max_concurrent=cfg.qidu_max_concurrent,
+            extract_script=os.path.expanduser(cfg.qidu_extract_script),
+            alerts=alerts,
+        )
+        qidu_parser.start()
+
     idle_loop.start()
 
     app = Application.builder().token(cfg.bot_token).build()
@@ -254,6 +267,8 @@ def main() -> int:
     try:
         app.run_polling()
     finally:
+        if qidu_parser:
+            qidu_parser.stop()
         loop._close_provider()
         health.stamp_clean_shutdown()
         idle_loop.stop()

@@ -410,6 +410,7 @@ def main() -> int:
     sleep_observer.start()
 
     stop_evt_holder = {"stop": False}
+    qidu_parser = None
 
     def _shutdown(signum: int, _frame) -> None:
         if stop_evt_holder["stop"]:
@@ -435,6 +436,11 @@ def main() -> int:
                 ilink.close()
             except Exception as e:
                 logger.warning("ilink close error: %s", e)
+            try:
+                if qidu_parser:
+                    qidu_parser.stop()
+            except Exception as e:
+                logger.warning("qidu_parser stop error: %s", e)
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -461,6 +467,18 @@ def main() -> int:
             if _has_jsonl:
                 boot_resume_sid = candidate
                 logger.info("bridge boot: resuming sid=%s", candidate[:8])
+
+    if cfg.qidu_api_base and cfg.qidu_token:
+        from synapse_core.qidu_parser import QiduParser
+        qidu_parser = QiduParser(
+            api_base=cfg.qidu_api_base,
+            token=cfg.qidu_token,
+            poll_interval=cfg.qidu_poll_interval,
+            max_concurrent=cfg.qidu_max_concurrent,
+            extract_script=os.path.expanduser(cfg.qidu_extract_script),
+            alerts=alerts,
+        )
+        qidu_parser.start()
 
     idle_loop.start()
     main_loop.start(boot_resume_sid=boot_resume_sid)

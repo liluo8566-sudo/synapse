@@ -42,6 +42,13 @@ class TgConfig:
     # Ack string overrides from [ack_overrides] — key -> {style -> template}
     ack_overrides: dict = field(default_factory=dict)
 
+    # Qidu book parser (empty api_base = disabled)
+    qidu_api_base: str = ""
+    qidu_token: str = ""
+    qidu_poll_interval: float = 10.0
+    qidu_max_concurrent: int = 2
+    qidu_extract_script: str = "~/workshop/qidu/local/extract_book.py"
+
 
 def load_config(path: Path | None = None) -> TgConfig:
     """Load config.toml; return defaults if absent or malformed."""
@@ -118,5 +125,20 @@ def load_config(path: Path | None = None) -> TgConfig:
             for k, v in ack.items()
             if isinstance(v, dict)
         }
+
+    qidu = data.get("qidu") or {}
+    if isinstance(qidu, dict):
+        for fname in ("api_base", "token", "extract_script"):
+            val = qidu.get(fname)
+            if isinstance(val, str):
+                setattr(cfg, f"qidu_{fname}", val)
+        for fname in ("poll_interval",):
+            val = qidu.get(fname)
+            if isinstance(val, (int, float)) and val > 0:
+                setattr(cfg, f"qidu_{fname}", float(val))
+        for fname in ("max_concurrent",):
+            val = qidu.get(fname)
+            if isinstance(val, int) and val > 0:
+                setattr(cfg, f"qidu_{fname}", val)
 
     return cfg

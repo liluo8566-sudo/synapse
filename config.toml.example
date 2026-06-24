@@ -45,6 +45,15 @@ sessionend_command = ""
 # 1 = "/path/to/project-a"
 # 2 = "/path/to/project-b"
 
+[qidu]
+# Qidu book parser — polls cloud server for pending books, dispatches local
+# sonnet sessions to parse them. Empty api_base = feature disabled.
+api_base = ""
+token = ""
+poll_interval = 10.0
+max_concurrent = 2
+extract_script = "~/workshop/qidu/local/extract_book.py"
+
 [alerts]
 # Command to pipe alerts into marrow (optional)
 marrow_repo_cmd = ""

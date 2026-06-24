@@ -57,6 +57,13 @@ class Config:
     # /cwd presets from [cwd_presets] — key (digit) -> path
     cwd_presets: dict = field(default_factory=dict)
 
+    # Qidu book parser (empty api_base = disabled)
+    qidu_api_base: str = ""
+    qidu_token: str = ""
+    qidu_poll_interval: float = 10.0
+    qidu_max_concurrent: int = 2
+    qidu_extract_script: str = "~/workshop/qidu/local/extract_book.py"
+
 
 def load_config(path: Path | None = None) -> Config:
     """Load config.toml; return defaults if absent or malformed."""
@@ -127,5 +134,20 @@ def load_config(path: Path | None = None) -> Config:
     presets = data.get("cwd_presets") or {}
     if isinstance(presets, dict):
         cfg.cwd_presets = {str(k): str(v) for k, v in presets.items() if isinstance(v, str)}
+
+    qidu = data.get("qidu") or {}
+    if isinstance(qidu, dict):
+        for fname in ("api_base", "token", "extract_script"):
+            val = qidu.get(fname)
+            if isinstance(val, str):
+                setattr(cfg, f"qidu_{fname}", val)
+        for fname in ("poll_interval",):
+            val = qidu.get(fname)
+            if isinstance(val, (int, float)) and val > 0:
+                setattr(cfg, f"qidu_{fname}", float(val))
+        for fname in ("max_concurrent",):
+            val = qidu.get(fname)
+            if isinstance(val, int) and val > 0:
+                setattr(cfg, f"qidu_{fname}", val)
 
     return cfg
