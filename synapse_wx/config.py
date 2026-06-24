@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,9 @@ class Config:
 
     # Ack string overrides from [ack_overrides] — key -> {style -> template}
     ack_overrides: dict | None = None
+
+    # /cwd presets from [cwd_presets] — key (digit) -> path
+    cwd_presets: dict = field(default_factory=dict)
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -120,5 +123,9 @@ def load_config(path: Path | None = None) -> Config:
             for k, v in ack.items()
             if isinstance(v, dict)
         }
+
+    presets = data.get("cwd_presets") or {}
+    if isinstance(presets, dict):
+        cfg.cwd_presets = {str(k): str(v) for k, v in presets.items() if isinstance(v, str)}
 
     return cfg

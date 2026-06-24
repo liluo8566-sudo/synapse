@@ -366,12 +366,19 @@ def main() -> int:
         compact_handler=_compact_handler,
         persist_state=_save_state,
         usage_client=usage_client.fetch,
+        commands_doc_path=Path(__file__).resolve().parent.parent / "COMMANDS.md",
         fetch_diary=_fetch_diary,
         record_effort=_record_effort,
         resolve_session_effort=lambda sid: marrow_session.get_session_effort(
             cfg.session_get_effort_command, sid
         ),
     )
+    if cfg.cwd_presets:
+        import synapse_core.commands.registry as _reg
+        _reg._CWD_PRESETS = tuple(
+            v for _, v in sorted(cfg.cwd_presets.items()) if v
+        )
+
     main_loop.set_registry(Registry(cmd_ctx))
 
     def on_sleep() -> None:

@@ -212,7 +212,7 @@ def test_clear_resets_session() -> None:
     verdict, reply = reg.dispatch("/clear")
     assert verdict == "handled"
     # B1: /clear lands on the configured default (opus-4.6[1m]).
-    assert (reply or "").startswith("新鸭上桌")
+    assert (reply or "").startswith("🐺🦦新窝开张")
     assert "Opus 4.6 [1M]" in (reply or "")
     assert hooks.swap_calls == [("claude-opus-4-6[1m]", None)]
     assert hooks.forget_calls == 1
@@ -225,7 +225,7 @@ def test_new_is_alias_for_clear() -> None:
     reg, hooks, _ = _make(s)
     verdict, reply = reg.dispatch("/new")
     assert verdict == "handled"
-    assert (reply or "").startswith("新鸭上桌")
+    assert (reply or "").startswith("🐺🦦新窝开张")
     assert hooks.swap_calls == [("claude-opus-4-6[1m]", None)]
     assert s.session_id is None
 

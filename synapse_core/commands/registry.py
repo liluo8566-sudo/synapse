@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -359,6 +361,8 @@ class Registry:
             return self._handle_cwd(rest)
         if name == "diary":
             return self._handle_diary(rest)
+        if name == "hb":
+            return self._handle_hb(rest)
         return self._t("unknown.cmd", x=head)
 
     # ── handlers ──────────────────────────────────────────────────
@@ -847,6 +851,47 @@ class Registry:
             "Respond naturally with your comments and feelings.]"
         )
         return self._t("diary.ok", date=label)
+
+    def _handle_hb(self, rest: str) -> str:
+        rest = rest.strip().lower()
+        hb_script = Path.home() / "heartbeat" / "plist.py"
+        python = sys.executable
+        if not rest:
+            try:
+                proc = subprocess.run(
+                    [python, str(hb_script), "status"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if "interval_min" in proc.stdout:
+                    import json as _json
+                    info = _json.loads(proc.stdout.replace("'", '"'))
+                    return self._t("hb.status", min=info["interval_min"])
+            except Exception:
+                pass
+            return self._t("hb.not_active")
+        if rest == "off":
+            try:
+                subprocess.run(
+                    [python, str(hb_script), "uninstall"],
+                    capture_output=True, timeout=5,
+                )
+            except Exception:
+                pass
+            return self._t("hb.off")
+        try:
+            minutes = int(rest)
+            if minutes < 1:
+                return self._t("hb.usage")
+        except ValueError:
+            return self._t("hb.usage")
+        try:
+            subprocess.run(
+                [python, str(hb_script), "install", str(minutes)],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            return self._t("hb.usage")
+        return self._t("hb.on", min=minutes)
 
     # ── helpers ──────────────────────────────────────────────────
 
