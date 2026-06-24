@@ -226,7 +226,7 @@ class QiduParser:
             "--input-format", "stream-json",
             "--permission-mode", "bypassPermissions",
             "--setting-sources", "",
-            "--max-turns", "25",
+            "--max-turns", "50",
         ]
         prompt = self._build_prompt(book)
         user_msg = json.dumps({
@@ -256,21 +256,25 @@ class QiduParser:
             proc.stdin.flush()
             # do NOT close stdin — claude needs it open for multi-turn tool calls
 
-            for line in proc.stdout:
-                if time.time() > deadline:
-                    timed_out = True
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+            debug_log = os.path.join(_TMP_BASE, f"{bid}.debug.jsonl")
+            with open(debug_log, "w") as dbg:
+                for line in proc.stdout:
+                    if time.time() > deadline:
+                        timed_out = True
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    dbg.write(line + "\n")
+                    dbg.flush()
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                if event.get("type") == "result":
-                    got_result = True
-                    break
+                    if event.get("type") == "result":
+                        got_result = True
+                        break
 
             if timed_out:
                 logger.warning("book %s: parse timed out", bid)
