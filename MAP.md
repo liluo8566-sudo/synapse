@@ -17,11 +17,11 @@
 [wx] ILink.send_* ◀── split_for_wechat ◀──┤◀── Provider.recv
                                            └◀── optional TTS pipeline [tg]
 
-Side: SessionTracker ──▶ IdleFireLoop (6h) ──▶ popen mw sessionend_async
+Side: SessionTracker ──▶ IdleFireLoop (mid_scan 30min) ──▶ popen mw mid_scan / sessionend_async
 [wx]  SleepWake ──▶ pause/resume · HealthGate ──▶ AlertSink
 ```
 
-Runtimes: bridge (launchd, single process) · cc subprocess (persistent, swap = close+respawn) · marrow sessionend_async (detached one-shot on idle fire).
+Runtimes: bridge (launchd, single process) · cc subprocess (persistent, swap = close+respawn) · marrow mid_scan (30min tick, pre-archive + three-way trigger) · sessionend_async (detached one-shot).
 
 ## 2. Core modules (synapse_core/)
 
@@ -43,7 +43,7 @@ Runtimes: bridge (launchd, single process) · cc subprocess (persistent, swap = 
 - commands/aliases.py — MODEL_ALIASES (5/fable/opus/sonnet/haiku).
 - commands/marrow_audit.py — mm-/mm+ direct sqlite to marrow.db.
 - sessionend/tracker.py — SessionTracker: sessions.json, RLock + atomic write.
-- sessionend/idle.py — IdleFireLoop: 6h idle, 30min scan, retry cap 2, .fired/.failed markers.
+- sessionend/idle.py — IdleFireLoop: 30min scan, cross-channel cleanup, mid_scan subprocess spawn, .mid_fired markers.
 
 ## 3. Inbound
 
@@ -68,7 +68,7 @@ Runtimes: bridge (launchd, single process) · cc subprocess (persistent, swap = 
 ## 6. Session lifecycle
 
 - SessionTracker (sessions.json, atomic write) — set on system{init}, forget on /clear.
-- IdleFireLoop (6h idle, 30min scan) — pre_spawn closes cc keeping sid; retry cap 2 → critical alert; .fired/.failed markers.
+- IdleFireLoop (30min scan) — cross-channel cleanup (claimed_away_hook + replay_bookmark); mid_scan three-way trigger (4h+10turns / 30turns+2h / 6h+4turns) via marrow.mid_scan subprocess.
 - record_session → marrow.sessions upsert. Any bridge session visible to cli /switch.
 - Boot resume: snapshot → state.session_id if jsonl exists.
 - MARROW_BRIDGE=1 → marrow SessionEnd hook defers to bridge (bridge_owns marker, 12h TTL fallback).
