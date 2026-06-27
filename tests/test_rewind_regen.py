@@ -1,14 +1,13 @@
 """B9 — `/rewind N` and `/regen` registry dispatch + side effects.
 
 Both commands:
-  1. Truncate the jsonl on disk via `jsonl_edit.drop_last_n_pairs`
-     (/regen always drops exactly one user/assistant pair).
-  2. Flag the dropped turns in marrow `audit_log` (`session_block=archive`)
-     so the daemon's Event ingest skips them.
-  3. Trigger a respawn via `respawn_with_resume(sid, model)` so cc reloads
+  1. Remove assistant reply cycles from jsonl via `jsonl_edit.drop_last_n_replies`
+     while keeping real user prompts.
+  2. Trigger a respawn via `respawn_with_resume(sid, model)` so cc reloads
      the trimmed history.
-  4. (/regen only) Resend the dropped user prompt via `replay_user_text`
-     so cc actually regenerates — `--resume` does not auto-replay.
+
+Note: session_block audit writes were removed — they clobbered mm- (latest-wins)
+and served no purpose (dropped turns are already gone from jsonl).
 
 Error path:
   - `/rewind 0` / `/rewind -3` / `/rewind` (no N) → `[error] ...`, no I/O.
@@ -112,6 +111,7 @@ class _Hooks:
         self.respawn_calls: list[tuple[str, str | None]] = []
         self.swap_calls: list[tuple[str | None, str | None]] = []
         self.replay_calls: list[str] = []
+        self.forget_calls: int = 0
 
     def audit(self, kind: str, sid: str, status: str) -> None:
         self.audit_calls.append((kind, sid, status))
@@ -137,7 +137,7 @@ def _make_ctx(
         state=state,
         swap_provider=hooks.swap,
         close_provider=lambda: None,
-        forget_session=lambda: None,
+        forget_session=lambda: setattr(hooks, 'forget_calls', hooks.forget_calls + 1),
         audit_writer=hooks.audit,
         respawn_with_resume=hooks.respawn,
         replay_user_text=hooks.replay,
@@ -150,7 +150,7 @@ def _make_ctx(
 # ── /rewind ──────────────────────────────────────────────────────────────────
 
 
-def test_rewind_n_truncates_jsonl_and_flags_dropped_turns(tmp_path: Path) -> None:
+def test_rewind_n_drops_replies_keeps_user_prompts(tmp_path: Path) -> None:
     sid = "abc12345"
     state = BridgeState(model="claude-opus-4-7[1m]", session_id=sid)
     jsonl = _seed_jsonl(
@@ -176,12 +176,13 @@ def test_rewind_n_truncates_jsonl_and_flags_dropped_turns(tmp_path: Path) -> Non
     assert verdict == "handled"
     assert reply is not None
     assert "失忆" in reply
-    # jsonl: last 2 pairs dropped
+    # jsonl: rewind 2 keeps anchor u2, drops a2+u3+a3
     remaining = _read_jsonl(jsonl)
     texts = [_event_text(ev) for ev in remaining]
-    assert texts == ["u1", "a1"]
-    # audit_log: session_block=archive must be written for the dropped sid.
-    assert ("session_block", sid, "archive") in hooks.audit_calls
+    assert texts == ["u1", "a1", "u2"]
+    # session_block writes removed — they clobbered mm- (latest-wins).
+    # Dropped turns are already gone from jsonl, no need for audit block.
+    assert ("session_block", sid, "archive") not in hooks.audit_calls
     # respawn was triggered with the same sid + model.
     assert hooks.respawn_calls == [(sid, "claude-opus-4-7[1m]")]
     # Sanity: projects_root resolves the file.
@@ -189,9 +190,7 @@ def test_rewind_n_truncates_jsonl_and_flags_dropped_turns(tmp_path: Path) -> Non
 
 
 def test_rewind_counts_real_user_prompts_skipping_tool_loop(tmp_path: Path) -> None:
-    """`/rewind 2` drops the last 2 user prompts AND every assistant/tool_use/
-    tool_result entry that came after them — tool_result lines (also type:user)
-    do not count as separate turns. Reply shows N=real prompts rewound.
+    """`/rewind 2` keeps prompts and drops reply-cycle material after them.
     """
     sid = "tool1234"
     state = BridgeState(model="claude-opus-4-7[1m]", session_id=sid)
@@ -219,18 +218,18 @@ def test_rewind_counts_real_user_prompts_skipping_tool_loop(tmp_path: Path) -> N
 
     assert verdict == "handled"
     assert reply == "🧠失忆中，请稍候...(2)"
-    # u1's full tool-use round survives intact.
+    # u1's full tool-use round survives intact; anchor u2 kept, u3+replies dropped.
     remaining = _read_jsonl(jsonl)
-    assert len(remaining) == 4
+    assert len(remaining) == 5
     assert remaining[0]["type"] == "user"
     assert remaining[1]["message"]["content"][0]["type"] == "tool_use"
     assert remaining[2]["message"]["content"][0]["type"] == "tool_result"
     assert remaining[3]["message"]["content"][0]["text"] == "a1 reply"
+    assert [_event_text(ev) for ev in remaining[4:]] == ["u2"]
 
 
-def test_rewind_one_drops_whole_tool_use_round(tmp_path: Path) -> None:
-    """`/rewind 1` on a tail with tool use drops the user prompt + tool_use +
-    tool_result + final reply — not just one jsonl line."""
+def test_rewind_one_drops_reply_cycle_keeps_prompt(tmp_path: Path) -> None:
+    """`/rewind 1` on a tail with tool use drops tool_use/tool_result/reply."""
     sid = "tool5678"
     state = BridgeState(model="claude-opus-4-7[1m]", session_id=sid)
     jsonl = _seed_jsonl(
@@ -256,7 +255,7 @@ def test_rewind_one_drops_whole_tool_use_round(tmp_path: Path) -> None:
     assert reply == "🧠失忆中，请稍候...(1)"
     remaining = _read_jsonl(jsonl)
     texts = [_event_text(ev) for ev in remaining]
-    assert texts == ["u1", "a1"]
+    assert texts == ["u1", "a1", "u2"]
 
 
 def test_rewind_rejects_zero(tmp_path: Path) -> None:
@@ -321,11 +320,10 @@ def test_rewind_without_sid_returns_error(tmp_path: Path) -> None:
 
 
 def test_rewind_n_exceeds_pairs_still_succeeds(tmp_path: Path) -> None:
-    """N>pairs available — handler should still complete (drop what exists,
-    respawn). Marrow flag still written so the dropped turns never ingest."""
+    """N>pairs available should drop the replies that exist and respawn."""
     sid = "fewer"
     state = BridgeState(model="opus", session_id=sid)
-    _seed_jsonl(
+    jsonl = _seed_jsonl(
         tmp_path,
         sid,
         [
@@ -333,20 +331,23 @@ def test_rewind_n_exceeds_pairs_still_succeeds(tmp_path: Path) -> None:
             _assistant("a1", "2026-06-02T10:00:01.000Z"),
         ],
     )
+    projects_root = tmp_path / ".claude" / "projects"
     hooks = _Hooks()
-    reg = _make_ctx(state=state, hooks=hooks, cwd=str(tmp_path))
+    reg = _make_ctx(
+        state=state, hooks=hooks, cwd=str(tmp_path), projects_root=projects_root
+    )
 
     verdict, reply = reg.dispatch("/rewind 99")
     assert verdict == "handled"
     assert reply is not None
-    # Even if jsonl was untouched (different cwd in test env), respawn fired.
     assert hooks.respawn_calls == [(sid, "opus")]
+    assert [_event_text(ev) for ev in _read_jsonl(jsonl)] == ["u1"]
 
 
 # ── /regen ───────────────────────────────────────────────────────────────────
 
 
-def test_regen_drops_last_pair_respawns_and_replays_user(tmp_path: Path) -> None:
+def test_regen_drops_pair_respawns_and_replays(tmp_path: Path) -> None:
     sid = "regen-sid"
     state = BridgeState(model="claude-opus-4-6[1m]", session_id=sid)
     jsonl = _seed_jsonl(
@@ -369,23 +370,14 @@ def test_regen_drops_last_pair_respawns_and_replays_user(tmp_path: Path) -> None
     assert verdict == "handled"
     assert reply is not None
     assert "失忆" in reply
-    # Respawn fired with the same sid+model.
     assert hooks.respawn_calls == [(sid, "claude-opus-4-6[1m]")]
-    # The dropped user prompt is pushed back on stdin so cc actually
-    # regenerates — cc's --resume does not auto-replay.
     assert hooks.replay_calls == ["u2"]
-    # Marrow audit flag written for the dropped pair.
-    block_calls = [c for c in hooks.audit_calls if c[0] == "session_block"]
-    assert block_calls, "expected session_block audit row for dropped turn"
-    # On-disk: u2 + a2-stale both gone, u1/a1 kept.
     remaining = _read_jsonl(jsonl)
     assert [_event_text(ev) for ev in remaining] == ["u1", "a1"]
 
 
-def test_regen_drops_whole_tool_use_round_and_replays_user(tmp_path: Path) -> None:
-    """/regen on a tool-use tail drops the user prompt, tool_use, tool_result,
-    and the final reply; replay_user_text receives the user prompt so cc
-    regenerates it on the fresh provider."""
+def test_regen_single_turn_with_tool_use_forgets_and_replays(tmp_path: Path) -> None:
+    """/regen on single-turn with tool use: drops pair, forgets session, replays."""
     sid = "regn1234"
     state = BridgeState(model="claude-opus-4-7[1m]", session_id=sid)
     jsonl = _seed_jsonl(
@@ -408,10 +400,32 @@ def test_regen_drops_whole_tool_use_round_and_replays_user(tmp_path: Path) -> No
 
     assert verdict == "handled"
     assert reply == "🧠失忆中，请稍候..."
-    remaining = _read_jsonl(jsonl)
-    assert [_event_text(ev) for ev in remaining] == []
-    assert hooks.respawn_calls == [(sid, "claude-opus-4-7[1m]")]
+    assert hooks.respawn_calls == []
+    assert hooks.forget_calls == 1
     assert hooks.replay_calls == ["u1"]
+
+
+def test_regen_with_no_assistant_reply_is_noop(tmp_path: Path) -> None:
+    sid = "pending"
+    state = BridgeState(model="claude-opus-4-7[1m]", session_id=sid)
+    jsonl = _seed_jsonl(
+        tmp_path,
+        sid,
+        [_user("u1", "2026-06-02T10:00:00.000Z")],
+    )
+    projects_root = tmp_path / ".claude" / "projects"
+    hooks = _Hooks()
+    reg = _make_ctx(
+        state=state, hooks=hooks, cwd=str(tmp_path), projects_root=projects_root
+    )
+
+    verdict, reply = reg.dispatch("/regen")
+
+    assert verdict == "handled"
+    assert reply == "Nothing to regen"
+    assert _read_jsonl(jsonl) == [_user("u1", "2026-06-02T10:00:00.000Z")]
+    assert hooks.respawn_calls == []
+    assert hooks.replay_calls == []
 
 
 def test_regen_without_sid_returns_error(tmp_path: Path) -> None:
@@ -549,4 +563,95 @@ def test_loop_respawn_with_resume_no_live_provider_still_spawns(tmp_path: Path) 
     loop.respawn_with_resume("sid-y", "opus")
     assert calls == [{"model": "opus", "resume_sid": "sid-y"}]
     assert loop._provider is not None
+    assert loop._provider.is_alive()
+
+
+def test_wx_respawn_with_resume_writes_suppress_flag_before_close(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from datetime import datetime
+
+    from synapse_core.debounce import InboundBuffer
+    from synapse_wx.loop import MainLoop
+    from synapse_core.providers.mock import EchoProvider
+    from synapse_core.sessionend.tracker import SessionTracker
+
+    fake_home = tmp_path / "home"
+    marrow_dir = fake_home / ".config" / "marrow"
+    marrow_dir.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    expected = marrow_dir / ".regen_suppress_sid-z"
+
+    class CloseCheckingProvider(EchoProvider):
+        def close(self) -> None:
+            assert expected.exists()
+            super().close()
+
+    state = BridgeState(model="opus", session_id="sid-z")
+    sessions = SessionTracker(state_path=tmp_path / "sessions.json")
+
+    def factory(model=None, resume_sid=None):
+        p = EchoProvider()
+        p.spawn()
+        return p
+
+    loop = MainLoop(
+        ilink=object(),
+        provider_factory=factory,
+        state=state,
+        sessions=sessions,
+        idle_loop=None,
+        buffer=InboundBuffer(),
+        poll_interval_sec=0.01,
+        wallclock=lambda: datetime(2026, 6, 2, 12, 0),
+        sleeper=lambda _s: None,
+        alert_dir=tmp_path / "alerts",
+        channel="wx",
+        last_active_path=tmp_path / "last_active.json",
+        channel_label="CC-WX",
+    )
+    live = CloseCheckingProvider()
+    live.spawn()
+    loop._provider = live
+
+    loop.respawn_with_resume("sid-z", "opus")
+
+    assert expected.exists()
+    assert expected.parent == fake_home / ".config" / "marrow"
+    assert not live.is_alive()
+
+
+def test_tg_respawn_with_resume_writes_suppress_flag_before_close(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from synapse_core.providers.mock import EchoProvider
+    from synapse_tg.config import TgConfig
+    from synapse_tg.loop import TgLoop
+
+    fake_home = tmp_path / "home"
+    marrow_dir = fake_home / ".config" / "marrow"
+    marrow_dir.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    expected = marrow_dir / ".regen_suppress_sid-tg"
+
+    class CloseCheckingProvider(EchoProvider):
+        def close(self) -> None:
+            assert expected.exists()
+            super().close()
+
+    cfg = TgConfig(data_dir=tmp_path / "tg-data")
+    loop = TgLoop(cfg)
+    live = CloseCheckingProvider()
+    live.spawn()
+    loop._provider = live
+
+    new_provider = EchoProvider()
+    monkeypatch.setattr(loop, "_make_provider", lambda: new_provider)
+
+    loop.respawn_with_resume("sid-tg", "opus")
+
+    assert expected.exists()
+    assert expected.parent == fake_home / ".config" / "marrow"
+    assert not live.is_alive()
+    assert loop._provider is new_provider
     assert loop._provider.is_alive()

@@ -893,11 +893,18 @@ class MainLoop:
         process flushing stale events.
         """
         if self._provider is not None:
+            # Suppress intermediate SessionEnd so regen/rewind doesn't archive truncated jsonl.
+            _suppress = Path.home() / ".config" / "marrow" / f".regen_suppress_{sid}"
+            try:
+                _suppress.touch(exist_ok=True)
+            except OSError:
+                pass
             try:
                 self._provider.close()
             except Exception as e:
                 logger.warning("respawn close failed: %s", e)
             self._provider = None
+        self._provider_death_count = 0
         try:
             new_provider = self._provider_factory(model=model, resume_sid=sid)
         except TypeError:
