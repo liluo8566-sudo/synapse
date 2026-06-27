@@ -188,8 +188,9 @@ class ClaudeCodeProvider(Provider):
             "--include-partial-messages",
             # CC hangs during settings/hooks/plugin init under launchd.
             # Skip auto-discovered settings; bridge injects context via
-            # --append-system-prompt instead.
-            "--setting-sources", "",
+            # --append-system-prompt instead.  Use = syntax so the empty
+            # value isn't swallowed by the CLI parser as a missing arg.
+            "--setting-sources=",
         ]
         if self.model:
             cmd += ["--model", self.model]
