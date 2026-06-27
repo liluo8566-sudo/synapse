@@ -54,7 +54,7 @@ _MERGE_NOTE = (
 )
 
 _SEND_GAP_SEC = 0.05
-_MAX_CONSECUTIVE_DEATHS = 3
+_MAX_CONSECUTIVE_DEATHS = 5
 _FLUSH_INTERVAL_SEC = 0.5
 
 # Streaming config
@@ -271,9 +271,10 @@ class TgLoop:
         logger.warning("provider dead — respawning (%d/%d)", self._death_count, _MAX_CONSECUTIVE_DEATHS)
         try:
             if self._provider:
-                self._provider.kill()
+                self._provider.cancel()
         except Exception:
             pass
+        time.sleep(2)
         self._provider = self._make_provider()
         self._provider.spawn()
 
