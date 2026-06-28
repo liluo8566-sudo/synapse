@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -167,6 +168,11 @@ class ClaudeCodeProvider(Provider):
         # Channel marker — the channel_marker hook reads this and prepends
         # the active channel to the user prompt.
         merged["MARROW_CHANNEL"] = self.channel
+        def _reset_signals():
+            signal.pthread_sigmask(signal.SIG_SETMASK, set())
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGABRT):
+                signal.signal(sig, signal.SIG_DFL)
+
         try:
             self.process = subprocess.Popen(
                 self._build_cmd(),
@@ -178,6 +184,7 @@ class ClaudeCodeProvider(Provider):
                 cwd=self.cwd,
                 env=merged,
                 start_new_session=True,
+                preexec_fn=_reset_signals,
             )
         except OSError as e:
             raise ProviderSpawnError(f"claude spawn failed: {e}") from e
