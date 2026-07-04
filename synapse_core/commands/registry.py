@@ -30,7 +30,7 @@ from synapse_core import jsonl_edit
 from synapse_core.state import BridgeState
 from synapse_core.usage import Usage
 from synapse_core.commands import messages
-from synapse_core.commands.aliases import MODEL_ALIASES, display_name, resolve_model
+from synapse_core.commands.aliases import MODEL_ALIASES, NATURAL_ALIASES, display_name, resolve_model
 from synapse_core.providers.codex import is_codex_model
 
 logger = logging.getLogger(__name__)
@@ -293,8 +293,8 @@ class Registry:
         if text == _MM_PLUS:
             return ("handled", self._handle_mm_plus())
 
-        # Natural alias path: bare alias matches a key in MODEL_ALIASES.
-        if text.lower() in MODEL_ALIASES:
+        # Natural alias path: bare text-only alias (no digits — too easy to misfire).
+        if text.lower() in NATURAL_ALIASES:
             return ("handled", self._handle_model(text))
 
         # Cross-channel session lock: auto-clear if another channel claimed this sid.
@@ -431,7 +431,8 @@ class Registry:
         state = self._ctx.state
         token = (rest or "").strip()
         if not token:
-            return self._t("model.usage")
+            aliases = "|".join(MODEL_ALIASES)
+            return self._t("model.usage", aliases=aliases)
         canonical = resolve_model(token) or token
         name = display_name(canonical)
         if canonical == state.model:

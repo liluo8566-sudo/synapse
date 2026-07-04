@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import signal
+import time
 import subprocess
 import sys
 from dataclasses import asdict
@@ -23,6 +24,7 @@ from synapse_core.commands.registry import CommandContext, Registry
 from .config import DEFAULT_CC_CWD, load_config
 from synapse_core.debounce import InboundBuffer
 from synapse_core.health import HealthGate
+from synapse_core.logging_config import configure_logging
 from .ilink import ILinkClient
 from .ilink.rawlog import RawPollLogger
 from .ilink.retry import DEFAULT_RETRYABLE, with_retry
@@ -75,16 +77,6 @@ SESSIONEND_ERR_LOG = LOG_DIR / "synapse-wx-sessionend.err.log"
 CC_STDERR_LOG = LOG_DIR / "synapse-wx-cc-stderr.log"
 
 
-def _configure_logging() -> None:
-    level_name = os.environ.get("SYNAPSE_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-
 def _wrap_ilink_with_alert_hook(ilink: ILinkClient, alerts: AlertSink) -> None:
     """Reapply the retry decorator on poll_messages/send_text so alerts.write fires
     after exhausted retries. The original decorator was applied without a hook;
@@ -118,10 +110,28 @@ def _wrap_ilink_with_alert_hook(ilink: ILinkClient, alerts: AlertSink) -> None:
 
 
 def main() -> int:
-    _configure_logging()
+    configure_logging(Path.home() / ".config/marrow/logs/synapse-wx/synapse-wx.log")
     cfg = load_config()
     if cfg.ack_overrides:
         cmd_messages.load_overrides(cfg.ack_overrides)
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    pid_path = CONFIG_DIR / "synapse-wx.pid"
+    if pid_path.exists():
+        try:
+            old_pid = int(pid_path.read_text().strip())
+            os.kill(old_pid, signal.SIGTERM)
+            logger.info("sent SIGTERM to stale process %d", old_pid)
+            time.sleep(1)
+            try:
+                os.kill(old_pid, 0)
+                os.kill(old_pid, signal.SIGKILL)
+                logger.info("SIGKILL stale process %d", old_pid)
+            except ProcessLookupError:
+                pass
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    pid_path.write_text(str(os.getpid()))
 
     alerts = AlertSink(alerts_dir=ALERTS_DIR, marrow_repo_cmd=cfg.marrow_repo_cmd)
     media_inbound.set_inbound_alert_sink(alerts)
@@ -171,26 +181,18 @@ def main() -> int:
     # captures `main_loop_box` and resolves at fire-time.
     main_loop_box: dict[str, MainLoop | None] = {"loop": None}
 
-    def _idle_close(sid: str) -> None:
-        ml = main_loop_box["loop"]
-        if ml is None:
-            return
-        ml.idle_close_provider(sid)
-
     def _claimed_away(sid: str) -> None:
         ml = main_loop_box["loop"]
         if ml is not None:
             ml.close_provider()
 
+    mid_cmd = marrow_session.mid_scan_command(cfg.sessionend_command, CHANNEL)
     idle_loop = IdleFireLoop(
         sessions=sessions,
-        command_template=cfg.sessionend_command,
+        mid_sessionend_command=mid_cmd,
         marker_dir=SESSION_MARKER_DIR,
         audit_log=SESSION_AUDIT_LOG,
-        sessionend_err_log=SESSIONEND_ERR_LOG,
         channel=CHANNEL,
-        alerts=alerts,
-        pre_spawn_hook=_idle_close,
         claimed_away_hook=_claimed_away,
     )
     buffer = InboundBuffer()

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
+import time
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, MessageHandler, filters
 
 from synapse_core import marrow_session
@@ -17,6 +20,7 @@ from synapse_core.commands import marrow_audit, messages
 from synapse_core.commands.handlers import replay_for_channel
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.health import HealthGate
+from synapse_core.logging_config import configure_logging
 from synapse_core.sessionend.idle import IdleFireLoop
 from synapse_core.sessionend.tracker import SessionTracker
 from synapse_core.usage import UsageClient
@@ -29,17 +33,8 @@ logger = logging.getLogger(__name__)
 CHANNEL = "tg"
 
 
-def _configure_logging() -> None:
-    level = getattr(logging, os.environ.get("SYNAPSE_LOG_LEVEL", "INFO").upper(), logging.INFO)
-    logging.basicConfig(
-        level=level,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-
 def main() -> int:
-    _configure_logging()
+    configure_logging(Path.home() / ".config/marrow/logs/synapse-tg/synapse-tg.log")
     cfg = load_config()
     if cfg.ack_overrides:
         messages.load_overrides(cfg.ack_overrides)
@@ -51,6 +46,24 @@ def main() -> int:
     # --- paths ---
     data_dir = cfg.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
+
+    pid_path = data_dir / "synapse-tg.pid"
+    if pid_path.exists():
+        try:
+            old_pid = int(pid_path.read_text().strip())
+            os.kill(old_pid, signal.SIGTERM)
+            logger.info("sent SIGTERM to stale process %d", old_pid)
+            time.sleep(1)
+            try:
+                os.kill(old_pid, 0)
+                os.kill(old_pid, signal.SIGKILL)
+                logger.info("SIGKILL stale process %d", old_pid)
+            except ProcessLookupError:
+                pass
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    pid_path.write_text(str(os.getpid()))
+
     marker_dir = data_dir / "markers"
     marker_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "alerts").mkdir(parents=True, exist_ok=True)
@@ -83,27 +96,20 @@ def main() -> int:
             sid=sid, model=model, channel=CHANNEL, effort=effort,
         )
 
-    def _idle_close(sid: str) -> None:
-        lp = loop_box["loop"]
-        if lp is not None:
-            lp.idle_close_provider(sid)
-
     # --- idle fire loop ---
     def _claimed_away(sid: str) -> None:
         lp = loop_box["loop"]
         if lp is not None:
             lp._close_provider()
 
+    mid_cmd = marrow_session.mid_scan_command(cfg.sessionend_command, CHANNEL)
     idle_loop = IdleFireLoop(
         sessions=sessions,
-        command_template=cfg.sessionend_command,
+        mid_sessionend_command=mid_cmd,
         marker_dir=marker_dir,
         audit_log=audit_log_path,
-        sessionend_err_log=sessionend_err_log,
         channel=CHANNEL,
         cc_projects_dir=Path(cc_projects_dir),
-        alerts=alerts,
-        pre_spawn_hook=_idle_close,
         claimed_away_hook=_claimed_away,
     )
 
@@ -266,6 +272,14 @@ def main() -> int:
     app.job_queue.run_repeating(loop.check_flush, interval=0.5, first=0.5)
     app.job_queue.run_repeating(loop.check_heartbeat, interval=15, first=10)
     app.job_queue.run_repeating(loop.check_book_signal, interval=5, first=5)
+
+    async def _error_handler(update, context):
+        if isinstance(context.error, (NetworkError, TimedOut)):
+            logger.warning("transient network error (auto-retry): %s", context.error)
+            return
+        logger.exception("unhandled error", exc_info=context.error)
+
+    app.add_error_handler(_error_handler)
 
     logger.info("synapse-tg starting (long-poll)")
     try:

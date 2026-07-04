@@ -43,14 +43,8 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
         "en": "Already {name}",
     },
     "model.usage": {
-        "cn": (
-            "宝宝打错了～ ₍ᐢ._.ᐢ₎\n"
-            "/model <codex|5|4.6|4.7|4.8|fable|sonnet|haiku|opus|claude-...>"
-        ),
-        "en": (
-            "Command: /model "
-            "<codex|5|4.6|4.7|4.8|fable|sonnet|haiku|opus|claude-...>"
-        ),
+        "cn": "查无此机，请重新输入：\n/model <{aliases}|claude-...>",
+        "en": "Command: /model <{aliases}|claude-...>",
     },
 
     # ── /clear ──────────────────────────────────────────────────
@@ -311,6 +305,10 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
     "provider.restarting": {
         "cn": "🐺爸爸重启中，再说一次～ ꒰ •̀ω•́ ꒱",
         "en": "[bridge: provider restarting, try again]",
+    },
+    "provider.gave_up": {
+        "cn": "provider连续暴毙，先停手",
+        "en": "[bridge: provider gave up]",
     },
     "bridge.error": {
         "cn": "💥桥炸了，再来一次 (ノ_<。)",

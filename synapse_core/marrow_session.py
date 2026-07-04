@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 _MODEL_RE = re.compile(rb'"model"\s*:\s*"(claude-[^"]+)"')
 
 
+def regen_suppress_path(sid: str) -> Path:
+    """Path for the regen/rewind suppress flag. Must match marrow config.DATA_DIR default."""
+    return Path.home() / ".config" / "marrow" / f".regen_suppress_{sid}"
+
+
 def _format(template: str, **fields: str) -> list[str] | None:
     """Substitute templated fields and shlex-split for subprocess. Returns
     None when the template is empty (marrow integration opted-out)."""
@@ -32,6 +37,31 @@ def _format(template: str, **fields: str) -> list[str] | None:
     except ValueError as e:
         logger.warning("marrow_session: shlex split failed for %r: %s", formatted, e)
         return None
+
+
+def mid_scan_command(sessionend_command: str, channel: str) -> str:
+    """Build mid_scan command from the configured marrow Python invocation."""
+    cmd = _format(sessionend_command, sid="{sid}")
+    if cmd is None:
+        return ""
+    try:
+        module_idx = cmd.index("marrow.sessionend_async")
+    except ValueError:
+        logger.warning("mid_scan disabled: unsupported sessionend_command")
+        return ""
+    if module_idx == 0 or cmd[module_idx - 1] != "-m":
+        logger.warning("mid_scan disabled: sessionend_command is not python -m")
+        return ""
+    mid_cmd = cmd[:module_idx] + [
+        "marrow.mid_scan",
+        "--sid",
+        "{sid}",
+        "--jsonl-path",
+        "{jsonl}",
+        "--channel",
+        channel,
+    ]
+    return " ".join(shlex.quote(part) for part in mid_cmd)
 
 
 def record_session(

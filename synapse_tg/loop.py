@@ -22,7 +22,7 @@ from telegram import Bot, Update
 from telegram.ext import ContextTypes
 
 from synapse_core import bridge_state_store
-from synapse_core.marrow_session import get_session_created_at, get_session_effort
+from synapse_core.marrow_session import get_session_created_at, get_session_effort, regen_suppress_path
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
@@ -280,6 +280,7 @@ class TgLoop:
 
     def ensure_provider(self) -> None:
         if self._death_count >= _MAX_CONSECUTIVE_DEATHS:
+            self._provider = None
             return
         if self._provider is None or not self._provider.is_alive():
             self._provider = self._make_provider()
@@ -294,7 +295,7 @@ class TgLoop:
         logger.warning("provider dead — respawning (%d/%d)", self._death_count, _MAX_CONSECUTIVE_DEATHS)
         try:
             if self._provider:
-                self._provider.kill()
+                self._provider.cancel()
         except Exception:
             pass
         self._provider = self._make_provider()
@@ -443,6 +444,9 @@ class TgLoop:
                                         preview_frozen = True
                                     chars_since_edit += len(preview_chunk)
 
+                                    if not accumulated.strip():
+                                        continue
+
                                     if stream_msg_id is None:
                                         typing.stop()
                                         sent = await bot.send_message(
@@ -489,6 +493,12 @@ class TgLoop:
             if isinstance(v, int):
                 self._state.usage_total[k] = self._state.usage_total.get(k, 0) + v
 
+    async def _send_provider_notice(self, bot: Bot, chat_id: int, key: str) -> None:
+        try:
+            await bot.send_message(chat_id=chat_id, text=messages.t(key, self._state.voice_style))
+        except Exception as e:
+            logger.warning("provider notice send failed (%s): %s", key, e)
+
     def idle_close_provider(self, sid: str) -> None:
         """Called by IdleFireLoop pre_spawn_hook. Graceful close if sids match."""
         if self._provider is None:
@@ -509,18 +519,20 @@ class TgLoop:
         """
         if self._provider is not None:
             self._user_initiated_close = True
-            # Suppress intermediate SessionEnd so regen/rewind doesn't archive truncated jsonl.
-            _suppress = Path.home() / ".config" / "marrow" / f".regen_suppress_{sid}"
             try:
-                _suppress.touch(exist_ok=True)
-            except OSError:
-                pass
-            try:
-                self._provider.close()
-            except Exception:
-                pass
-            self._provider = None
-            self._user_initiated_close = False
+                # Suppress intermediate SessionEnd so regen/rewind doesn't archive truncated jsonl.
+                _suppress = regen_suppress_path(sid)
+                try:
+                    _suppress.touch(exist_ok=True)
+                except OSError:
+                    pass
+                try:
+                    self._provider.close()
+                except Exception:
+                    pass
+                self._provider = None
+            finally:
+                self._user_initiated_close = False
         self._death_count = 0
 
         # Check if the session jsonl still exists on disk. The session
@@ -801,8 +813,13 @@ class TgLoop:
                     return
                 logger.error("provider error: %s", e)
                 self._respawn()
+                if self._death_count >= _MAX_CONSECUTIVE_DEATHS:
+                    logger.error("provider gave up after %d consecutive deaths", self._death_count)
+                    self._provider = None
+                    await self._send_provider_notice(bot, chat_id, "provider.gave_up")
+                    return
                 self._buffer.prepend(body)
-                await bot.send_message(chat_id=chat_id, text=messages.t("provider.restarting", self._state.voice_style))
+                await self._send_provider_notice(bot, chat_id, "provider.restarting")
                 return
             except Exception as e:
                 logger.error("unexpected error: %s", e)
