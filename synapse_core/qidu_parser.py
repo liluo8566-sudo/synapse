@@ -106,9 +106,14 @@ class QiduParser:
             self._lock_fd = fd
             return True
         except BlockingIOError:
+            os.close(fd)
             return False
         except OSError as e:
             logger.warning("flock error: %s", e)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
             return False
 
     def _release_lock(self) -> None:

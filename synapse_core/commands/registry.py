@@ -31,6 +31,7 @@ from synapse_core.state import BridgeState
 from synapse_core.usage import Usage
 from synapse_core.commands import messages
 from synapse_core.commands.aliases import MODEL_ALIASES, display_name, resolve_model
+from synapse_core.providers.codex import is_codex_model
 
 logger = logging.getLogger(__name__)
 
@@ -435,7 +436,11 @@ class Registry:
         name = display_name(canonical)
         if canonical == state.model:
             return self._t("model.same", name=name)
-        self._ctx.swap_provider(canonical, state.session_id)
+        resume_sid = state.session_id
+        if is_codex_model(canonical) != is_codex_model(state.model):
+            resume_sid = None
+            state.session_id = None
+        self._ctx.swap_provider(canonical, resume_sid)
         state.model = canonical
         self._ctx.persist_state()
         return self._t("model.ok", name=name)

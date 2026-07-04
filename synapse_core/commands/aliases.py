@@ -15,6 +15,7 @@ MODEL_ALIASES: dict[str, str] = {
     "haiku": "claude-haiku-4-5-20251001",
     "5": "claude-fable-5",
     "fable": "claude-fable-5",
+    "codex": "codex",
 }
 
 MODEL_NAMES: dict[str, str] = {
@@ -24,6 +25,7 @@ MODEL_NAMES: dict[str, str] = {
     "claude-sonnet-4-6": "Sonnet 4.6",
     "claude-haiku-4-5-20251001": "Haiku 4.5",
     "claude-fable-5": "Fable 5",
+    "codex": "Codex",
 }
 
 # Strip cc context-window suffix like "[1m]" / "[200k]" before MODEL_NAMES lookup,

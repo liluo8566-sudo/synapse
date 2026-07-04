@@ -27,6 +27,7 @@ from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
 from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT
+from synapse_core.providers.codex import CodexProvider, is_codex_model
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.state import BridgeState
 
@@ -252,9 +253,19 @@ class TgLoop:
         )
         return Registry(ctx)
 
-    def _make_provider(self) -> ClaudeCodeProvider:
+    def _make_provider(self) -> ClaudeCodeProvider | CodexProvider:
         cfg = self._cfg
         state = self._state
+        if is_codex_model(state.model):
+            return CodexProvider(
+                model=state.model,
+                resume_sid=state.session_id,
+                cwd=state.cc_cwd or (str(cfg.cwd) if cfg.cwd else None),
+                channel="tg",
+                effort_level=state.effort_level,
+                stderr_log=Path.home() / "Library/Logs/synapse-tg-codex-stderr.log",
+                system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT],
+            )
         return ClaudeCodeProvider(
             model=state.model,
             resume_sid=state.session_id,

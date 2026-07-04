@@ -27,7 +27,13 @@ from .ilink import ILinkClient
 from .ilink.rawlog import RawPollLogger
 from .ilink.retry import DEFAULT_RETRYABLE, with_retry
 from .loop import MainLoop
-from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT, WX_ICLOUD_PROMPT
+from synapse_core.providers.cc import (
+    MEDIA_SYSTEM_PROMPT,
+    QUOTE_SYSTEM_PROMPT,
+    WX_ICLOUD_PROMPT,
+    ClaudeCodeProvider,
+)
+from synapse_core.providers.codex import CodexProvider, is_codex_model
 from synapse_core.sessionend.idle import IdleFireLoop
 from synapse_core.sessionend.tracker import SessionTracker
 from .sleep import SleepWakeObserver
@@ -197,14 +203,37 @@ def main() -> int:
 
     def provider_factory(
         model: str | None = None, resume_sid: str | None = None
-    ) -> ClaudeCodeProvider:
+    ) -> ClaudeCodeProvider | CodexProvider:
+        selected_model = model if model is not None else state.model
+        if is_codex_model(selected_model):
+            return CodexProvider(
+                model=selected_model,
+                resume_sid=resume_sid,
+                cwd=state.cc_cwd,
+                effort_level=state.effort_level,
+                stderr_log=CC_STDERR_LOG,
+                system_prompts=[
+                    QUOTE_SYSTEM_PROMPT,
+                    MEDIA_SYSTEM_PROMPT,
+                    WX_ICLOUD_PROMPT,
+                    WX_STICKER_PROMPT,
+                    WX_BUBBLE_FORMAT_PROMPT,
+                ],
+                channel=CHANNEL,
+            )
         return ClaudeCodeProvider(
-            model=model if model is not None else state.model,
+            model=selected_model,
             resume_sid=resume_sid,
             cwd=state.cc_cwd,
             effort_level=state.effort_level,
             stderr_log=CC_STDERR_LOG,
-            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, WX_ICLOUD_PROMPT, WX_STICKER_PROMPT, WX_BUBBLE_FORMAT_PROMPT],
+            system_prompts=[
+                QUOTE_SYSTEM_PROMPT,
+                MEDIA_SYSTEM_PROMPT,
+                WX_ICLOUD_PROMPT,
+                WX_STICKER_PROMPT,
+                WX_BUBBLE_FORMAT_PROMPT,
+            ],
             marrow_bridge=True,
             channel=CHANNEL,
         )

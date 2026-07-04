@@ -43,8 +43,14 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
         "en": "Already {name}",
     },
     "model.usage": {
-        "cn": "宝宝打错了～ ₍ᐢ._.ᐢ₎\n/model <5|4.6|4.7|4.8|fable|sonnet|haiku|opus|claude-...>",
-        "en": "Command: /model <5|4.6|4.7|4.8|fable|sonnet|haiku|opus|claude-...>",
+        "cn": (
+            "宝宝打错了～ ₍ᐢ._.ᐢ₎\n"
+            "/model <codex|5|4.6|4.7|4.8|fable|sonnet|haiku|opus|claude-...>"
+        ),
+        "en": (
+            "Command: /model "
+            "<codex|5|4.6|4.7|4.8|fable|sonnet|haiku|opus|claude-...>"
+        ),
     },
 
     # ── /clear ──────────────────────────────────────────────────

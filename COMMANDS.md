@@ -32,6 +32,7 @@
 - 4.6 / 4.7 / 4.8 / opus → Opus [1m]
 - sonnet → Sonnet 4.6
 - haiku → Haiku 4.5
+- codex → Codex CLI
 
 ## Hold words
 

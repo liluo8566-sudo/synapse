@@ -34,6 +34,10 @@ def test_resolve_alias_fable_5() -> None:
     assert resolve_model("fable") == "claude-fable-5"
 
 
+def test_resolve_alias_codex() -> None:
+    assert resolve_model("codex") == "codex"
+
+
 def test_resolve_alias_case_insensitive() -> None:
     assert resolve_model("Sonnet") == "claude-sonnet-4-6"
     assert resolve_model("OPUS") == "claude-opus-4-8[1m]"
@@ -70,6 +74,10 @@ def test_display_name_known() -> None:
 
 def test_display_name_fable() -> None:
     assert display_name("claude-fable-5") == "Fable 5"
+
+
+def test_display_name_codex() -> None:
+    assert display_name("codex") == "Codex"
 
 
 def test_display_name_known_with_context_suffix() -> None:

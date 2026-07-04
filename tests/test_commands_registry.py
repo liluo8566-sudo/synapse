@@ -185,6 +185,26 @@ def test_model_raw_canonical_id_passes_through() -> None:
     assert hooks.swap_calls == [("claude-future-9", None)]
 
 
+def test_model_switch_to_codex_drops_claude_sid() -> None:
+    s = BridgeState(model="claude-opus-4-8[1m]", session_id="sid-abc")
+    reg, hooks, _ = _make(s)
+    verdict, _ = reg.dispatch("/model codex")
+    assert verdict == "handled"
+    assert hooks.swap_calls == [("codex", None)]
+    assert s.model == "codex"
+    assert s.session_id is None
+
+
+def test_model_switch_within_codex_keeps_thread_id() -> None:
+    s = BridgeState(model="codex", session_id="thread-abc")
+    reg, hooks, _ = _make(s)
+    verdict, _ = reg.dispatch("/model codex:gpt-5.5")
+    assert verdict == "handled"
+    assert hooks.swap_calls == [("codex:gpt-5.5", "thread-abc")]
+    assert s.model == "codex:gpt-5.5"
+    assert s.session_id == "thread-abc"
+
+
 def test_natural_alias_routes_as_model() -> None:
     s = BridgeState(model=None, session_id="sid-xyz")
     reg, hooks, _ = _make(s)
