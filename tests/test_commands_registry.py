@@ -152,7 +152,7 @@ def test_model_alias_switch() -> None:
     reg, hooks, _ = _make(s)
     verdict, reply = reg.dispatch("/model 4.7")
     assert verdict == "handled"
-    assert reply == "🤖(Opus 4.7 [1M])上线中..."
+    assert reply == "🐺换脑子了...Opus 4.7 [1M]上线 (˶ᵔ ᵕ ᵔ˶)"
     assert hooks.swap_calls == [("claude-opus-4-7[1m]", "sid-abc")]
     assert s.model == "claude-opus-4-7[1m]"
 
@@ -181,7 +181,7 @@ def test_model_raw_canonical_id_passes_through() -> None:
     verdict, reply = reg.dispatch("/model claude-future-9")
     assert verdict == "handled"
     # display fallback uses the id itself.
-    assert reply == "🤖(claude-future-9)上线中..."
+    assert reply == "🐺换脑子了...claude-future-9上线 (˶ᵔ ᵕ ᵔ˶)"
     assert hooks.swap_calls == [("claude-future-9", None)]
 
 
@@ -210,7 +210,7 @@ def test_natural_alias_routes_as_model() -> None:
     reg, hooks, _ = _make(s)
     verdict, reply = reg.dispatch("4.7")
     assert verdict == "handled"
-    assert reply == "🤖(Opus 4.7 [1M])上线中..."
+    assert reply == "🐺换脑子了...Opus 4.7 [1M]上线 (˶ᵔ ᵕ ᵔ˶)"
     assert hooks.swap_calls == [("claude-opus-4-7[1m]", "sid-xyz")]
     assert s.model == "claude-opus-4-7[1m]"
 
