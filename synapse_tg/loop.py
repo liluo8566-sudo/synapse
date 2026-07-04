@@ -295,7 +295,7 @@ class TgLoop:
         logger.warning("provider dead — respawning (%d/%d)", self._death_count, _MAX_CONSECUTIVE_DEATHS)
         try:
             if self._provider:
-                self._provider.cancel()
+                self._provider.kill()
         except Exception:
             pass
         self._provider = self._make_provider()
