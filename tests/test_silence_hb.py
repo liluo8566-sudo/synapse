@@ -63,7 +63,7 @@ def test_closed_comment_guard_no_truncation() -> None:
     assert display_text == "hello "
 
 
-# ── /hb install returns "" (reaction path) ────────────────────────────────────
+# ── /hb install returns text ack ─────────────────────────────────────────────
 
 
 def _make_registry() -> tuple[Registry, BridgeState]:
@@ -78,14 +78,15 @@ def _make_registry() -> tuple[Registry, BridgeState]:
     return Registry(ctx), s
 
 
-def test_hb_install_returns_empty_string() -> None:
-    """Successful /hb <minutes> install returns '' so on_message sets reaction."""
+def test_hb_install_returns_text_ack() -> None:
+    """Successful /hb <minutes> install returns a non-empty text ack confirming the interval."""
     reg, _ = _make_registry()
     with patch("synapse_core.commands.registry.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
         verdict, ack = reg.dispatch("/hb 20")
     assert verdict == "handled"
-    assert ack == ""
+    assert ack  # non-empty — confirms interval change to user
+    assert "20" in ack
 
 
 def test_hb_status_returns_text() -> None:

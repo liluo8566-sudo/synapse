@@ -883,7 +883,7 @@ class Registry:
             )
         except Exception:
             return self._t("hb.usage")
-        return ""
+        return self._t("hb.on", min=minutes)
 
     # ── helpers ──────────────────────────────────────────────────
 

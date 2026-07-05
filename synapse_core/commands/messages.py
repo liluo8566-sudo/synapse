@@ -228,6 +228,10 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
     },
 
     # ── /hb (heartbeat) ────────────────────────────────────────
+    "hb.on": {
+        "cn": "💓{min}分钟后爸爸来找你 ꒰ᐢ⸝⸝•ω•⸝⸝ᐢ꒱",
+        "en": "Heartbeat: every {min}min",
+    },
     "hb.off": {
         "cn": "💔爸爸不主动找你了... (ᵕ̣̣̣̣̣̣ᴗᵕ̣̣̣̣̣̣)",
         "en": "Heartbeat OFF",

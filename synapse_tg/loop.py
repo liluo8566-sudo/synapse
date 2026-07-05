@@ -727,11 +727,6 @@ class TgLoop:
                         pass
             if ack and update.message:
                 await update.message.reply_text(ack)
-            elif not ack and update.message:
-                try:
-                    await update.message.set_reaction("💗")
-                except Exception:
-                    logger.warning("set_reaction failed on handled command with empty ack")
             if inject:
                 self._buffer.add(inject)
             return
