@@ -140,6 +140,12 @@ class ClaudeCodeProvider(Provider):
             # without it, the final assistant `thinking` block is empty under
             # OAuth (redacted to signature only).
             "--include-partial-messages",
+            # fable-5+ models default to thinking display "omitted": the
+            # plaintext is empty and the full chain is encrypted into the
+            # signature field (documented API behaviour, not a bug). Request
+            # summarized display explicitly so `thinking_delta` events carry
+            # readable text regardless of host settings. Needs cc >= 2.1.x.
+            "--thinking-display", "summarized",
         ]
         if self.model:
             cmd += ["--model", self.model]

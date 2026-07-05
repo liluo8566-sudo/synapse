@@ -872,8 +872,8 @@ class TgLoop:
             think_html = f"<tg-spoiler><blockquote expandable>\U0001f4ad\n{gfm_to_tg_html(truncated)}</blockquote></tg-spoiler>"
             try:
                 await bot.send_message(chat_id=chat_id, text=think_html, parse_mode="HTML")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("thinking bubble send failed: %s", e)
 
         reply_to_id = None
         quote_match = re.search(r"<quote>(.*?)</quote>", response, re.DOTALL)
