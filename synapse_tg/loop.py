@@ -878,16 +878,8 @@ class TgLoop:
 
         # HTML-comment silence protocol: strip all <!-- ... --> before delivering.
         response = strip_html_comments(response)
-        if not response:
-            if stream_msg_id is not None:
-                try:
-                    await bot.delete_message(chat_id=chat_id, message_id=stream_msg_id)
-                except Exception:
-                    pass
-            return
 
-        # Thinking: send as expandable blockquote after main response
-        # Only when there IS a response — prevents bot-to-bot thinking loops
+        # Thinking bubble: send before the early-return so silent turns still show it.
         if thinking and self._state.thinking_on:
             truncated = thinking[:2000]
             if len(thinking) > 2000:
@@ -897,6 +889,14 @@ class TgLoop:
                 await bot.send_message(chat_id=chat_id, text=think_html, parse_mode="HTML")
             except Exception as e:
                 logger.warning("thinking bubble send failed: %s", e)
+
+        if not response:
+            if stream_msg_id is not None:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=stream_msg_id)
+                except Exception:
+                    pass
+            return
 
         reply_to_id = None
         quote_match = re.search(r"<quote>(.*?)</quote>", response, re.DOTALL)
