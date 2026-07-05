@@ -87,6 +87,17 @@ MEDIA_SYSTEM_PROMPT = (
     "Desc format for ingest: emotion/scene | image text | one-line visual (CN preferred)."
 )
 
+# HTML-comment silence protocol: the bridge strips all <!-- ... --> from replies
+# before sending. A reply consisting solely of comments sends nothing at all.
+SILENCE_SYSTEM_PROMPT = (
+    "The bridge strips all HTML comments <!-- ... --> from your reply before "
+    "delivering it to the user. If you judge that this turn needs no reply at "
+    "all (nothing worth saying, or the user should not be disturbed), reply "
+    "with ONLY a comment, e.g. <!-- silent -->, and the bridge will send "
+    "nothing. You may also use comments for private asides that should not be "
+    "delivered. Never rely on comments being visible to the user."
+)
+
 WX_ICLOUD_PROMPT = (
     "Large files are auto-routed to iCloud by the bridge — no action needed."
 )

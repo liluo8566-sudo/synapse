@@ -26,7 +26,7 @@ from synapse_core.marrow_session import get_session_created_at, get_session_effo
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
-from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT
+from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT
 from synapse_core.providers.codex import CodexProvider, is_codex_model
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.state import BridgeState
@@ -65,6 +65,13 @@ _STREAM_EDIT_CHARS = 200      # or every N new chars, whichever comes first
 # Strip media tags from streaming preview — handled after completion
 _MEDIA_TAG_RE = re.compile(r'<(image|gif|video|file)\s+path="[^"]*"\s*/?>', re.IGNORECASE)
 
+# HTML-comment silence protocol: strip all complete <!-- ... --> before sending.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def strip_html_comments(text: str) -> str:
+    """Remove all complete HTML comments from text and strip whitespace."""
+    return _HTML_COMMENT_RE.sub("", text).strip()
 
 
 def _chat_meta(msg) -> str:
@@ -264,7 +271,7 @@ class TgLoop:
                 channel="tg",
                 effort_level=state.effort_level,
                 stderr_log=Path.home() / "Library/Logs/synapse-tg-codex-stderr.log",
-                system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT],
+                system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT],
             )
         return ClaudeCodeProvider(
             model=state.model,
@@ -275,7 +282,7 @@ class TgLoop:
             marrow_bridge=cfg.marrow_bridge,
             effort_level=state.effort_level,
             stderr_log=Path.home() / "Library/Logs/synapse-tg-cc-stderr.log",
-            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT],
+            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT],
         )
 
     def ensure_provider(self) -> None:
@@ -436,6 +443,7 @@ class TgLoop:
                             text_chunks.append(chunk)
                             if not preview_frozen:
                                 preview_chunk = _MEDIA_TAG_RE.sub("", chunk)
+                                preview_chunk = _HTML_COMMENT_RE.sub("", preview_chunk)
                                 if preview_chunk:
                                     accumulated += preview_chunk
                                     # Freeze preview at first bubble boundary
@@ -444,13 +452,19 @@ class TgLoop:
                                         preview_frozen = True
                                     chars_since_edit += len(preview_chunk)
 
-                                    if not accumulated.strip():
+                                    # Guard: truncate display at unclosed <!--
+                                    display_text = accumulated
+                                    open_idx = display_text.find("<!--")
+                                    if open_idx != -1:
+                                        display_text = display_text[:open_idx]
+
+                                    if not display_text.strip():
                                         continue
 
                                     if stream_msg_id is None:
                                         typing.stop()
                                         sent = await bot.send_message(
-                                            chat_id=chat_id, text=accumulated
+                                            chat_id=chat_id, text=display_text
                                         )
                                         stream_msg_id = sent.message_id
                                         last_edit_time = time.monotonic()
@@ -461,7 +475,7 @@ class TgLoop:
                                             now - last_edit_time >= _STREAM_EDIT_INTERVAL
                                             or chars_since_edit >= _STREAM_EDIT_CHARS
                                         ):
-                                            await _do_edit(accumulated)
+                                            await _do_edit(display_text)
 
                     elif bt == "tool_use":
                         if not typing.running:
@@ -644,7 +658,9 @@ class TgLoop:
             "[system:heartbeat] Heartbeat fired. "
             "You felt like checking in on 霜霜 — ask what she's up to, "
             "share a small thought, be warm and natural. "
-            "Keep it short (1-2 bubbles). Don't mention 'heartbeat' or 'system'.",
+            "Keep it short (1-2 bubbles). Don't mention 'heartbeat' or 'system'. "
+            "If now is not a good time to disturb her, reply with only <!-- silent --> "
+            "and the bridge will send nothing.",
         ]
         status_line = (
             f"Mac status: mem {mem.get('used_gb', '?')}/{mem.get('total_gb', '?')}GB, "
@@ -711,6 +727,11 @@ class TgLoop:
                         pass
             if ack and update.message:
                 await update.message.reply_text(ack)
+            elif not ack and update.message:
+                try:
+                    await update.message.set_reaction("💗")
+                except Exception:
+                    logger.warning("set_reaction failed on handled command with empty ack")
             if inject:
                 self._buffer.add(inject)
             return
@@ -860,7 +881,14 @@ class TgLoop:
             logger.info("same sender new inbound during streaming — delivering reply, new messages queued")
         self._turn_user_id = None
 
+        # HTML-comment silence protocol: strip all <!-- ... --> before delivering.
+        response = strip_html_comments(response)
         if not response:
+            if stream_msg_id is not None:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=stream_msg_id)
+                except Exception:
+                    pass
             return
 
         # Thinking: send as expandable blockquote after main response
