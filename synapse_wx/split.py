@@ -68,14 +68,14 @@ _LIST_ITEM = re.compile(r"^\s*[-·*]\s+")
 DEFAULT_HARD_MAX = 99999
 MAX_WX_BUBBLES = 99
 
-# /thinking: emit cc's plaintext thinking as ONE wx bubble prefixed 🧠.
+# /thinking: emit cc's plaintext thinking as ONE wx bubble prefixed 💭.
 # Test-drive: no splitting; we want to see how wx renders a long single
 # bubble (and whether iLink rejects it) before deciding on splitting.
-_THINKING_PREFIX = "🧠"
+_THINKING_PREFIX = "💭"
 
 
 def format_thinking_bubbles(text: str | None) -> list[str]:
-    """Single bubble per turn: ``[🧠 <text>]``. No truncation, no splitting.
+    """Single bubble per turn: ``[💭 <text>]``. No truncation, no splitting.
 
     Returns ``[]`` when there is nothing meaningful to show.
     """

@@ -80,7 +80,7 @@ def test_thinking_bad_arg_returns_error() -> None:
 
 def test_format_thinking_short_single_bubble() -> None:
     out = format_thinking_bubbles("我在想这个问题")
-    assert out == ["🧠我在想这个问题"]
+    assert out == ["💭我在想这个问题"]
 
 
 def test_format_thinking_long_text_kept_whole() -> None:
@@ -88,8 +88,8 @@ def test_format_thinking_long_text_kept_whole() -> None:
     body = "。".join([f"第{i}个想法" for i in range(1, 31)]) + "。"
     out = format_thinking_bubbles(body)
     assert len(out) == 1
-    assert out[0].startswith("🧠")
-    assert out[0] == f"🧠{body}"
+    assert out[0].startswith("💭")
+    assert out[0] == f"💭{body}"
 
 
 def test_format_thinking_empty_returns_empty_list() -> None:

@@ -810,7 +810,7 @@ class MainLoop:
                     # Under --include-partial-messages, cc fills BOTH the
                     # stream_event thinking_delta path AND this final-frame
                     # thinking block with the same plaintext. Reading both
-                    # produced a duplicated 🧠 bubble. stream_event is the
+                    # produced a duplicated 💭 bubble. stream_event is the
                     # source of truth — skip here.
                     pass
         elif isinstance(content, str):

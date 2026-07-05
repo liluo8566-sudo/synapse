@@ -413,7 +413,7 @@ def test_thinking_then_fake_quote_then_reply(env) -> None:
     _, _, t0 = ilink.sent[0]
     _, _, t1 = ilink.sent[1]
     _, _, t2 = ilink.sent[2]
-    assert t0.startswith("🧠")
+    assert t0.startswith("💭")
     assert t1 == "▎hello"
     assert t2 == "got it"
 
