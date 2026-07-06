@@ -67,7 +67,7 @@ _MEDIA_TAG_RE = re.compile(r'<(image|gif|video|file)\s+path="[^"]*"\s*/?>', re.I
 
 # HTML-comment silence protocol lives in synapse_core.text_filters;
 # re-exported here so existing imports keep working.
-from synapse_core.text_filters import strip_html_comments  # noqa: E402
+from synapse_core.text_filters import _HTML_COMMENT_RE, strip_html_comments  # noqa: E402
 
 
 def _chat_meta(msg) -> str:
