@@ -868,6 +868,17 @@ class TgLoop:
             logger.info("same sender new inbound during streaming — delivering reply, new messages queued")
         self._turn_user_id = None
 
+        await self._deliver_reply(bot, chat_id, response, thinking, stream_msg_id)
+
+    async def _deliver_reply(
+        self,
+        bot: Bot,
+        chat_id: int,
+        response: str,
+        thinking: str,
+        stream_msg_id: int | None,
+    ) -> None:
+        """Send a completed provider response to the chat."""
         # HTML-comment silence protocol: strip all <!-- ... --> before delivering.
         response = strip_html_comments(response)
 
@@ -950,3 +961,24 @@ class TgLoop:
                 if reply_to_id is not None:
                     reply_to_id = None
             await asyncio.sleep(_SEND_GAP_SEC)
+
+    async def check_autonomous_turn(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """PTB job: drain and deliver any autonomous provider turn (no inbound send)."""
+        if self._lock.locked():
+            return
+        if self._provider is None or not getattr(self._provider, "is_alive", lambda: False)():
+            return
+        if not getattr(self._provider, "has_complete_turn", lambda: False)():
+            return
+        try:
+            async with self._lock:
+                if not getattr(self._provider, "has_complete_turn", lambda: False)():
+                    return
+                response, thinking = await asyncio.to_thread(self._drain_recv)
+            if self._pending_chat_id is None:
+                logger.info("autonomous turn drained but no pending_chat_id — turn consumed")
+                return
+            bot = self._bot or context.bot
+            await self._deliver_reply(bot, self._pending_chat_id, response, thinking, None)
+        except ProviderDeadError as e:
+            logger.error("autonomous turn: provider dead: %s", e)

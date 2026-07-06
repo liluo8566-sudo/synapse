@@ -272,6 +272,7 @@ def main() -> int:
     app.job_queue.run_repeating(loop.check_flush, interval=0.5, first=0.5)
     app.job_queue.run_repeating(loop.check_heartbeat, interval=15, first=10)
     app.job_queue.run_repeating(loop.check_book_signal, interval=5, first=5)
+    app.job_queue.run_repeating(loop.check_autonomous_turn, interval=3, first=5)
 
     async def _error_handler(update, context):
         if isinstance(context.error, (NetworkError, TimedOut)):
