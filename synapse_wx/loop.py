@@ -486,12 +486,14 @@ class MainLoop:
                 label = "these images" if n_images > 1 else "this image"
                 if desc:
                     body = (
-                        f"[sticker-save] Save {label} as sticker via sticker_ingest."
+                        f"[sticker-save] Save {label} as sticker via "
+                        f"sticker_admin(action='ingest')."
                         f" Desc: {desc}"
                     )
                 else:
                     body = (
-                        f"[sticker-save] Save {label} as sticker via sticker_ingest."
+                        f"[sticker-save] Save {label} as sticker via "
+                        f"sticker_admin(action='ingest')."
                         f" Use vision to write desc."
                     )
                 logger.info(

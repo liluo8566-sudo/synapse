@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 WX_STICKER_PROMPT = (
     "WeChat cannot display animated GIFs as stickers. "
-    "Always call sticker_search with animated=false so only static stickers are returned."
+    "Always call sticker with action='search', animated=false so only static stickers are returned."
 )
 
 WX_BUBBLE_FORMAT_PROMPT = (

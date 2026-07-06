@@ -3,8 +3,8 @@
 When a user sends an image followed by a digit caption within the quiet window,
 the bridge intercepts the pattern before media materialisation and either:
   - "0"        → suppress image(s); skip the provider turn entirely
-  - "1"        → rewrite body to sticker_ingest instruction (vision desc)
-  - "1 <text>" → rewrite body to sticker_ingest instruction with desc
+  - "1"        → rewrite body to sticker_admin(action='ingest') instruction (vision desc)
+  - "1 <text>" → rewrite body to sticker_admin(action='ingest') instruction with desc
   - anything else / no text → normal pass-through, no change
 """
 
@@ -197,7 +197,7 @@ def test_caption_1_rewrites_body_image_materialised(env) -> None:
     assert provider.received, "provider.send should have been called"
     sent = provider.received[0]
     assert "[sticker-save]" in sent
-    assert "sticker_ingest" in sent
+    assert "sticker_admin" in sent
     assert "vision" in sent
     assert "Use the Read tool" in sent  # image still materialised
     assert ilink.downloads, "image should be downloaded"
