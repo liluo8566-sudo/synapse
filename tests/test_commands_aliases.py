@@ -30,8 +30,8 @@ def test_resolve_alias_haiku_dated() -> None:
 
 
 def test_resolve_alias_fable_5() -> None:
-    assert resolve_model("5") == "claude-fable-5"
-    assert resolve_model("fable") == "claude-fable-5"
+    assert resolve_model("5") == "claude-fable-5[1m]"
+    assert resolve_model("fable") == "claude-fable-5[1m]"
 
 
 def test_resolve_alias_codex() -> None:

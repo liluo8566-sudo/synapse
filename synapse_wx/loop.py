@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from synapse_core import last_active
+from synapse_core import heartbeat, last_active
+from synapse_core.text_filters import strip_html_comments
 from synapse_core.marrow_session import get_session_created_at, regen_suppress_path
 from synapse_core.alerts import AlertSink
 from synapse_core.anchor import quote_prefix, time_anchor
@@ -359,6 +360,32 @@ class MainLoop:
         self._announce_target = target_wxid
         self._announce_text = text
 
+    _HB_SIGNAL = heartbeat.SIGNAL_PATH
+
+    def _check_heartbeat(self) -> None:
+        """Consume the heartbeat signal only when the B6 last-active pointer
+        says 霜霜 is on wx; otherwise leave it on disk for the tg bridge
+        (the default consumer)."""
+        if not self._HB_SIGNAL.exists():
+            return
+        if self._last_from_wxid is None:
+            return
+        la = last_active.read(self._last_active_path)
+        if not la or la.get("channel") != "wx":
+            return
+        # Quiet-window: only inject after N minutes of silence
+        if la.get("ts"):
+            if time.time() - la["ts"] < heartbeat.get_interval_seconds():
+                return  # too soon — leave signal for next tick
+        try:
+            data = json.loads(self._HB_SIGNAL.read_text())
+            self._HB_SIGNAL.unlink(missing_ok=True)
+        except Exception:
+            return
+        with self._state_lock:
+            self._buffer.add(heartbeat.build_prompt(data))
+        logger.info("heartbeat injected (anomalies=%d)", len(data.get("anomalies", [])))
+
     _BOOK_SIGNAL = Path.home() / ".shared-reading" / "signal.json"
 
     def _check_book_signal(self) -> None:
@@ -382,6 +409,7 @@ class MainLoop:
 
     def tick(self) -> None:
         """One inbound poll: route bridge commands; buffer the rest for the provider."""
+        self._check_heartbeat()
         self._check_book_signal()
         try:
             msgs = self._ilink.poll_messages()
@@ -546,9 +574,10 @@ class MainLoop:
             return
 
         # B6: stamp the cross-channel last-active pointer once we have a sid.
-        # Best-effort; never blocks the outbound path.
+        # Best-effort; never blocks the outbound path. Injected turns
+        # (heartbeat etc.) don't count as her activity.
         sid = self.state.session_id
-        if sid:
+        if sid and not body.startswith("[system:"):
             try:
                 last_active.write(
                     self._last_active_path,
@@ -587,6 +616,10 @@ class MainLoop:
         # FRAGMENT becomes a standalone visual fake-quote bubble prepended
         # to the reply (▎FRAGMENT, truncated). The real ref_msg outbound
         # path was removed — WeChat does NOT render it.
+        # HTML-comment silence protocol (parity with tg): strip complete
+        # <!-- ... --> comments. A reply that strips to empty sends no text
+        # bubbles; the thinking head (when /thinking on) still ships below.
+        reply_text = strip_html_comments(reply_text)
         reply_text, fake_quote_bubbles = self._extract_quote_from_reply(reply_text)
         bubbles: list[dict] = split_for_wechat_typed(reply_text)
         # Tag stripping is unconditional (above); only the decorative bubbles

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from telegram import Bot, Update
 from telegram.ext import ContextTypes
 
-from synapse_core import bridge_state_store
+from synapse_core import bridge_state_store, heartbeat, last_active
 from synapse_core.marrow_session import get_session_created_at, get_session_effort, regen_suppress_path
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
@@ -65,13 +65,9 @@ _STREAM_EDIT_CHARS = 200      # or every N new chars, whichever comes first
 # Strip media tags from streaming preview — handled after completion
 _MEDIA_TAG_RE = re.compile(r'<(image|gif|video|file)\s+path="[^"]*"\s*/?>', re.IGNORECASE)
 
-# HTML-comment silence protocol: strip all complete <!-- ... --> before sending.
-_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-
-
-def strip_html_comments(text: str) -> str:
-    """Remove all complete HTML comments from text and strip whitespace."""
-    return _HTML_COMMENT_RE.sub("", text).strip()
+# HTML-comment silence protocol lives in synapse_core.text_filters;
+# re-exported here so existing imports keep working.
+from synapse_core.text_filters import strip_html_comments  # noqa: E402
 
 
 def _chat_meta(msg) -> str:
@@ -640,49 +636,32 @@ class TgLoop:
             if self._turn_user_id is not None and user_id == self._turn_user_id:
                 self._same_sender_interrupted = True
 
-    _HB_SIGNAL = Path.home() / ".heartbeat" / "signal.json"
+    _HB_SIGNAL = heartbeat.SIGNAL_PATH
+    _LAST_ACTIVE_PATH = Path.home() / ".config" / "marrow" / "last_active.json"
 
     async def check_heartbeat(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._HB_SIGNAL.exists():
             return
         if self._pending_chat_id is None:
             return
+        # Heartbeat follows her: if the B6 last-active pointer says she's on
+        # wx, leave the signal on disk for the wx bridge to consume. tg stays
+        # the default for missing pointers and channels with no heartbeat
+        # loop (e.g. cli).
+        la = last_active.read(self._LAST_ACTIVE_PATH)
+        if la and la.get("channel") == "wx":
+            return
+        # Quiet-window: only inject after N minutes of silence
+        if la and la.get("ts"):
+            if time.time() - la["ts"] < heartbeat.get_interval_seconds():
+                return  # too soon — leave signal for next tick
         try:
             data = json.loads(self._HB_SIGNAL.read_text())
             self._HB_SIGNAL.unlink(missing_ok=True)
         except Exception:
             return
-        mem = data.get("memory", {})
-        anomalies = data.get("anomalies", [])
-        parts = [
-            "[system:heartbeat] Heartbeat fired. "
-            "You felt like checking in on 霜霜 — ask what she's up to, "
-            "share a small thought, be warm and natural. "
-            "Keep it short (1-2 bubbles). Don't mention 'heartbeat' or 'system'. "
-            "If now is not a good time to disturb her, reply with only <!-- silent --> "
-            "and the bridge will send nothing.",
-        ]
-        status_line = (
-            f"Mac status: mem {mem.get('used_gb', '?')}/{mem.get('total_gb', '?')}GB, "
-            f"pressure {mem.get('pressure', '?')}, "
-            f"swap {data.get('swap_gb', '?')}GB, "
-            f"CPU {data.get('cpu_percent', '?')}%"
-        )
-        if anomalies:
-            warns = "; ".join(
-                f"{a['name']} PID {a['pid']} using {a['mem_gb']}GB"
-                for a in anomalies
-            )
-            parts.append(
-                f"⚠️ {status_line}. ANOMALY: {warns}. "
-                "Mention this naturally — something like 'btw your Mac is running hot'."
-            )
-        else:
-            parts.append(
-                f"System healthy: {status_line}. No issues — don't mention the Mac."
-            )
-        self._buffer.add("\n".join(parts))
-        logger.info("heartbeat injected (anomalies=%d)", len(anomalies))
+        self._buffer.add(heartbeat.build_prompt(data))
+        logger.info("heartbeat injected (anomalies=%d)", len(data.get("anomalies", [])))
 
     _BOOK_SIGNAL = Path.home() / ".shared-reading" / "signal.json"
 
@@ -841,6 +820,19 @@ class TgLoop:
                     if self._state.session_id != self._provider.session_id:
                         self._state.session_id = self._provider.session_id
                         self._persist_state()
+                # B6: stamp the cross-channel last-active pointer (parity with
+                # wx). Injected turns (heartbeat etc.) don't count as her
+                # activity — only stamp when the turn carries real inbound.
+                if self._state.session_id and not body.startswith("[system:"):
+                    try:
+                        last_active.write(
+                            self._LAST_ACTIVE_PATH,
+                            self._state.session_id,
+                            "tg",
+                            time.time(),
+                        )
+                    except Exception as e:
+                        logger.warning("last_active write failed: %s", e)
             except ProviderDeadError as e:
                 if self._user_initiated_close:
                     self._user_initiated_close = False
