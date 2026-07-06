@@ -271,6 +271,10 @@ class MainLoop:
         while not self._stop_evt.is_set():
             if not self._paused:
                 try:
+                    self._maybe_drain_autonomous()
+                except Exception as e:
+                    logger.warning("autonomous drain error: %s", e, exc_info=True)
+                try:
                     self.maybe_flush()
                 except Exception as e:
                     logger.warning("flush tick error: %s", e, exc_info=True)
@@ -610,26 +614,29 @@ class MainLoop:
                     "pre-send merge: reply dropped, %d chars re-queued", len(replay)
                 )
                 return
-        # Quote-lite: extract <quote>FRAGMENT</quote> from the WHOLE reply
-        # BEFORE splitting on newlines. Pre-split extraction guarantees a
-        # multi-line tag never leaks across bubbles as literal text. The
-        # FRAGMENT becomes a standalone visual fake-quote bubble prepended
-        # to the reply (▎FRAGMENT, truncated). The real ref_msg outbound
-        # path was removed — WeChat does NOT render it.
-        # HTML-comment silence protocol (parity with tg): strip complete
-        # <!-- ... --> comments. A reply that strips to empty sends no text
-        # bubbles; the thinking head (when /thinking on) still ships below.
+        self._deliver_reply(reply_text, from_wxid, ctx_token)
+
+    def _deliver_reply(
+        self, reply_text: str, from_wxid: str, ctx_token: str
+    ) -> None:
+        """Post-process reply_text and send as WeChat bubbles.
+
+        Handles HTML-comment stripping, <quote> extraction, /thinking bubbles,
+        and the per-bubble send loop. Extracted from maybe_flush so autonomous
+        turns (no matching send) can be delivered the same way.
+        """
+        # HTML-comment silence protocol: strip complete <!-- ... --> comments.
+        # A reply that strips to empty sends no text bubbles.
         reply_text = strip_html_comments(reply_text)
         reply_text, fake_quote_bubbles = self._extract_quote_from_reply(reply_text)
         bubbles: list[dict] = split_for_wechat_typed(reply_text)
-        # Tag stripping is unconditional (above); only the decorative bubbles
+        # Tag stripping is unconditional; only the decorative fake-quote bubbles
         # are gated behind /quote on so Lumi's default-off feed stays clean.
         if fake_quote_bubbles and self.state.quote_on:
             fqb = [{"kind": "text", "text": b} for b in fake_quote_bubbles]
             bubbles = fqb + bubbles
         # /thinking: prepend full thinking content as one or more 【思考】 /
-        # ⋯ bubbles when enabled. Thinking head goes BEFORE the fake-quote
-        # bubble so the visual flow stays thinking → quoted → reply.
+        # ⋯ bubbles when enabled. Thinking head goes BEFORE fake-quote bubble.
         if self.state.thinking_on and self._last_thinking:
             tbs = format_thinking_bubbles(self._last_thinking)
             if tbs:
@@ -666,6 +673,29 @@ class MainLoop:
                 self._stop_typing()
             if i < len(bubbles) - 1:
                 self._sleeper(_BUBBLE_GAP_SEC)
+
+    def _maybe_drain_autonomous(self) -> None:
+        """Drain one buffered autonomous turn and deliver it if _last_from_wxid is set.
+
+        Called at the top of each _flush_run iteration before maybe_flush so
+        the pipe stays aligned when cc emits turns without a matching send().
+        Even when _last_from_wxid is None the turn is drained (consumed) so
+        the next send()+recv() pair sees its own reply.
+        """
+        if not self._provider_alive():
+            return
+        has_turn = getattr(self._provider, "has_complete_turn", None)
+        if has_turn is None or not has_turn():
+            return
+        wxid = self._last_from_wxid
+        ctx = self._last_ctx_token
+        try:
+            reply = self._drain_recv()
+        except ProviderDeadError as e:
+            self._handle_provider_dead(e, wxid, ctx)
+            return
+        if wxid:
+            self._deliver_reply(reply, wxid, ctx)
 
     def _extract_quote_from_reply(
         self, reply_text: str

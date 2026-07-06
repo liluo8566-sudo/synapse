@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -137,6 +138,10 @@ class ClaudeCodeProvider(Provider):
         self.alive: bool = False
         self.session_id: str | None = None
         self.usage_total: dict[str, int] = {}
+        # Resident reader thread infrastructure (populated in spawn()).
+        self._event_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._complete_turns: int = 0
+        self._turn_lock = threading.Lock()
 
     def _build_cmd(self) -> list[str]:
         cmd = [
@@ -199,6 +204,10 @@ class ClaudeCodeProvider(Provider):
         except OSError as e:
             raise ProviderSpawnError(f"claude spawn failed: {e}") from e
         self.alive = True
+        # Reset buffered-turn state on each spawn so a re-spawned provider
+        # starts with an empty queue and zero counter.
+        self._event_queue = queue.Queue()
+        self._complete_turns = 0
         if self.stderr_log is not None:
             t = threading.Thread(
                 target=_drain_stderr,
@@ -207,6 +216,47 @@ class ClaudeCodeProvider(Provider):
                 daemon=True,
             )
             t.start()
+        reader = threading.Thread(
+            target=self._reader_thread,
+            name="cc-stdout-reader",
+            daemon=True,
+        )
+        reader.start()
+
+    def _reader_thread(self) -> None:
+        """Daemon thread: sole consumer of process.stdout.
+
+        Pumps every line into _event_queue as a parsed dict. Bad JSON is
+        skipped with a warning (same policy as the old inline recv loop).
+        On EOF (or any error) puts a None sentinel so recv() can detect
+        subprocess death. Increments _complete_turns for each result frame
+        so has_complete_turn() works without touching the queue.
+        """
+        assert self.process is not None
+        assert self.process.stdout is not None
+        try:
+            for line in self.process.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError as e:
+                    log.warning("skip non-json line: %s (%s)", line[:120], e)
+                    continue
+                self._event_queue.put(ev)
+                if ev.get("type") == "result":
+                    with self._turn_lock:
+                        self._complete_turns += 1
+        except Exception as exc:
+            log.warning("cc-reader-thread error: %s", exc)
+        finally:
+            self._event_queue.put(None)
+
+    def has_complete_turn(self) -> bool:
+        """True iff at least one complete (result-terminated) turn is buffered."""
+        with self._turn_lock:
+            return self._complete_turns > 0
 
     def send(self, msg: str) -> None:
         if not self.alive or self.process is None or self.process.stdin is None:
@@ -233,18 +283,16 @@ class ClaudeCodeProvider(Provider):
         self.send(text)
 
     def recv(self) -> Iterator[dict[str, Any]]:
-        if not self.alive or self.process is None or self.process.stdout is None:
+        if not self.alive or self.process is None:
             raise ProviderDeadError("subprocess not alive")
         saw_result = False
-        for line in self.process.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError as e:
-                log.warning("skip non-json line: %s (%s)", line[:120], e)
-                continue
+        while True:
+            ev = self._event_queue.get()
+            if ev is None:
+                # EOF sentinel: re-enqueue so subsequent recv() callers also
+                # get it immediately rather than blocking forever.
+                self._event_queue.put(None)
+                break
             t = ev.get("type")
             if t == "system" and ev.get("subtype") == "init":
                 sid = ev.get("session_id")
@@ -259,6 +307,8 @@ class ClaudeCodeProvider(Provider):
             yield ev
             if t == "result":
                 saw_result = True
+                with self._turn_lock:
+                    self._complete_turns = max(0, self._complete_turns - 1)
                 break
         if not saw_result:
             raise ProviderDeadError("subprocess died during recv")

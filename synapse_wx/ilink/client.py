@@ -175,12 +175,31 @@ class ILinkClient:
                 return False
             ret = resp_data.get("ret")
             if resp.status_code != 200 or (ret is not None and ret != 0):
-                logger.error(
-                    "Failed to send message: ret=%s, errmsg=%s",
-                    resp_data.get("ret"),
-                    resp_data.get("errmsg", resp.text[:200]),
+                # First attempt failed — retry the same chunk once after a
+                # brief pause. Production saw ret=-2 rejections that dropped
+                # messages permanently without a retry.
+                time.sleep(1.5)
+                resp = self._client.post(
+                    f"{self.base_url}/ilink/bot/sendmessage",
+                    headers=self._headers(),
+                    json=payload,
                 )
-                return False
+                try:
+                    resp_data = resp.json()
+                except (json.JSONDecodeError, ValueError):
+                    logger.error(
+                        "Non-JSON response from sendmessage after retry: status=%d",
+                        resp.status_code,
+                    )
+                    return False
+                ret = resp_data.get("ret")
+                if resp.status_code != 200 or (ret is not None and ret != 0):
+                    logger.error(
+                        "Failed to send message after retry: ret=%s, errmsg=%s",
+                        resp_data.get("ret"),
+                        resp_data.get("errmsg", resp.text[:200]),
+                    )
+                    return False
         return True
 
     def send_typing(self, to_user_id: str, context_token: str) -> None:
