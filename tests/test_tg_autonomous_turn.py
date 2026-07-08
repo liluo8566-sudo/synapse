@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_tg.config import TgConfig
+from synapse_tg import loop as loop_module
 from synapse_tg.loop import TgLoop
 
 
@@ -132,3 +135,67 @@ def test_autonomous_turn_drained_but_not_sent_when_no_pending_chat_id(tmp_path: 
 
     assert not bot.messages, "bot should not receive messages when pending_chat_id is None"
     assert not provider.has_complete_turn(), "turn must still be drained"
+
+
+class HangingProvider:
+    """Provider whose recv() blocks forever — simulates the deadlock scenario."""
+
+    session_id = None
+    usage_total: dict = {}
+
+    def __init__(self) -> None:
+        self.alive = True
+        self._complete_turns = 1
+        self._hang_event = threading.Event()
+
+    def spawn(self) -> None:
+        self.alive = True
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def has_complete_turn(self) -> bool:
+        return self._complete_turns > 0
+
+    def send(self, _msg: str) -> None:
+        pass
+
+    def recv(self) -> Iterator[dict]:
+        self._hang_event.wait()
+        return
+        yield  # make it a generator
+
+    def kill(self) -> None:
+        self.alive = False
+        self._hang_event.set()
+
+
+def test_autonomous_drain_timeout_calls_respawn_and_releases_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When _drain_recv hangs past the timeout, check_autonomous_turn must:
+    1. call _respawn()
+    2. return without deadlocking (lock released)
+    """
+    monkeypatch.setattr(loop_module, "_AUTONOMOUS_DRAIN_TIMEOUT", 0.05)
+
+    loop = _make_loop(tmp_path)
+    provider = HangingProvider()
+    loop._provider = provider  # type: ignore[assignment]
+    loop._pending_chat_id = 42
+    bot = FakeBot()
+    loop._bot = bot  # type: ignore[assignment]
+
+    respawn_called = []
+
+    def fake_respawn():
+        respawn_called.append(True)
+        provider.kill()
+
+    loop._respawn = fake_respawn  # type: ignore[method-assign]
+
+    asyncio.run(loop.check_autonomous_turn(FakeContext(bot)))
+
+    assert respawn_called, "_respawn must be called on drain timeout"
+    assert not loop._lock.locked(), "lock must be released after timeout"
+    assert not bot.messages, "no message should be delivered on timeout"

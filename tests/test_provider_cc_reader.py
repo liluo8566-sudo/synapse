@@ -147,3 +147,35 @@ def test_off_by_one_autonomous_then_reply_pairing():
         assert a_result["result"] == "reply A"
 
         assert not p.has_complete_turn()
+
+
+# ── Test 4: reader ordering — counter incremented before queue put ────────────
+
+def test_reader_increments_counter_before_queue_put():
+    """For a result frame, has_complete_turn() must be True at the moment the
+    event becomes visible in the queue.  We intercept queue.put to assert this
+    invariant at the exact instant of insertion."""
+    lines = _make_lines(_TURN_1)
+
+    violations: list[str] = []
+
+    with patch("synapse_core.providers.cc.subprocess.Popen") as Popen:
+        Popen.return_value = _make_fake_popen(lines)
+        p = _provider()
+        p.spawn()
+
+        original_put = p._event_queue.put
+
+        def intercepting_put(ev):
+            if isinstance(ev, dict) and ev.get("type") == "result":
+                if not p.has_complete_turn():
+                    violations.append("counter not yet incremented when result put")
+            original_put(ev)
+
+        p._event_queue.put = intercepting_put  # type: ignore[method-assign]
+
+        # Drain to let reader thread run (it may already be done; we just need
+        # to consume events so join works).
+        list(p.recv())
+
+    assert not violations, violations[0]

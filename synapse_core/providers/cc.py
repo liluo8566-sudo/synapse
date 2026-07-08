@@ -244,10 +244,10 @@ class ClaudeCodeProvider(Provider):
                 except json.JSONDecodeError as e:
                     log.warning("skip non-json line: %s (%s)", line[:120], e)
                     continue
-                self._event_queue.put(ev)
                 if ev.get("type") == "result":
                     with self._turn_lock:
                         self._complete_turns += 1
+                self._event_queue.put(ev)
         except Exception as exc:
             log.warning("cc-reader-thread error: %s", exc)
         finally:

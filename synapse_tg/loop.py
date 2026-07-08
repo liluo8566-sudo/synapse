@@ -55,6 +55,7 @@ _MERGE_NOTE = (
 )
 
 _SEND_GAP_SEC = 0.05
+_AUTONOMOUS_DRAIN_TIMEOUT = 120
 _MAX_CONSECUTIVE_DEATHS = 3
 _FLUSH_INTERVAL_SEC = 0.5
 
@@ -477,13 +478,14 @@ class TgLoop:
                         if not typing.running:
                             typing.start()
                     elif bt == "thinking":
-                        # Under --include-partial-messages, cc fills BOTH the
-                        # stream_event thinking_delta path AND this final-frame
-                        # thinking block with the same plaintext. Under OAuth
-                        # the final block is signature-only (empty). Reading
-                        # both duplicates the bubble; stream_event is source
-                        # of truth — skip here.
-                        pass
+                        # Fallback: stream_event thinking_delta is preferred
+                        # (fable needs it), but opus 4.x often only fills
+                        # this final block. Read it only when no deltas
+                        # arrived yet to avoid duplicate bubbles.
+                        if not thinking_chunks:
+                            txt = block.get("thinking")
+                            if isinstance(txt, str) and txt:
+                                thinking_chunks.append(txt)
                 usage = msg.get("usage")
                 if isinstance(usage, dict):
                     self._merge_usage(usage)
@@ -974,7 +976,15 @@ class TgLoop:
             async with self._lock:
                 if not getattr(self._provider, "has_complete_turn", lambda: False)():
                     return
-                response, thinking = await asyncio.to_thread(self._drain_recv)
+                try:
+                    response, thinking = await asyncio.wait_for(
+                        asyncio.to_thread(self._drain_recv),
+                        timeout=_AUTONOMOUS_DRAIN_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("autonomous drain timeout — respawning provider")
+                    self._respawn()
+                    return
             if self._pending_chat_id is None:
                 logger.info("autonomous turn drained but no pending_chat_id — turn consumed")
                 return
