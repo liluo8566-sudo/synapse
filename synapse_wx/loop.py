@@ -870,12 +870,14 @@ class MainLoop:
                     if isinstance(txt, str):
                         sink.append(txt)
                 elif seg_type == "thinking":
-                    # Under --include-partial-messages, cc fills BOTH the
-                    # stream_event thinking_delta path AND this final-frame
-                    # thinking block with the same plaintext. Reading both
-                    # produced a duplicated 💭 bubble. stream_event is the
-                    # source of truth — skip here.
-                    pass
+                    # Fallback: stream_event thinking_delta is preferred
+                    # (fable needs it), but opus 4.x often only fills this
+                    # final block. Read it only when no deltas arrived yet
+                    # to avoid duplicate bubbles.
+                    if thinking_sink is not None and not thinking_sink:
+                        txt = seg.get("thinking")
+                        if isinstance(txt, str) and txt:
+                            thinking_sink.append(txt)
         elif isinstance(content, str):
             sink.append(content)
         usage = message.get("usage")
