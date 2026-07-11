@@ -22,6 +22,7 @@ from telegram import Bot, Update
 from telegram.ext import ContextTypes
 
 from synapse_core import bridge_state_store, heartbeat, last_active
+from synapse_core.qidu_signal import QiduSignalPoller
 from synapse_core.marrow_session import get_session_created_at, get_session_effort, regen_suppress_path
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
@@ -116,11 +117,20 @@ class TgLoop:
         sessions=None,
         record_session=None,
         idle_loop=None,
+        alerts=None,
     ) -> None:
         self._cfg = cfg
         self._sessions = sessions
         self._record_session = record_session
         self._idle_loop = idle_loop
+        self._qidu_signal: QiduSignalPoller | None = None
+        if cfg.qidu_api_base and cfg.qidu_token:
+            self._qidu_signal = QiduSignalPoller(
+                api_base=cfg.qidu_api_base,
+                token=cfg.qidu_token,
+                channel="tg",
+                alerts=alerts,
+            )
         self._provider: ClaudeCodeProvider | None = None
         self._lock = asyncio.Lock()
         self._death_count = 0
@@ -665,25 +675,16 @@ class TgLoop:
         self._buffer.add(heartbeat.build_prompt(data))
         logger.info("heartbeat injected (anomalies=%d)", len(data.get("anomalies", [])))
 
-    _BOOK_SIGNAL = Path.home() / ".shared-reading" / "signal.json"
-
-    async def check_book_signal(self, context) -> None:
-        if not self._BOOK_SIGNAL.exists():
+    async def check_qidu_signal(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self._qidu_signal is None:
             return
         if self._pending_chat_id is None:
             return
-        try:
-            data = json.loads(self._BOOK_SIGNAL.read_text())
-            self._BOOK_SIGNAL.unlink(missing_ok=True)
-            prompt = data.get("prompt", "")
-            if prompt:
-                self._buffer.add(prompt)
-        except Exception as e:
-            logger.warning("book signal read failed: %s", e)
-            try:
-                self._BOOK_SIGNAL.unlink(missing_ok=True)
-            except Exception:
-                pass
+        if not self._qidu_signal.should_poll():
+            return
+        texts = await asyncio.to_thread(self._qidu_signal.fetch)
+        for text in texts:
+            self._buffer.add(text)
 
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or update.message.text is None:

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from synapse_core import heartbeat, last_active
+from synapse_core.qidu_signal import QiduSignalPoller
 from synapse_core.text_filters import strip_html_comments
 from synapse_core.marrow_session import get_session_created_at, regen_suppress_path
 from synapse_core.alerts import AlertSink
@@ -190,6 +191,19 @@ class MainLoop:
         self._stop_evt = threading.Event()
         self._poll_thread: threading.Thread | None = None
         self._flush_thread: threading.Thread | None = None
+
+        self._qidu_signal: QiduSignalPoller | None = None
+        self._qidu_signal_interval = 5.0
+        self._last_qidu_signal_poll = 0.0
+        if cfg is not None and cfg.qidu_api_base and cfg.qidu_token:
+            self._qidu_signal = QiduSignalPoller(
+                api_base=cfg.qidu_api_base,
+                token=cfg.qidu_token,
+                channel="wx",
+                last_active_path=self._last_active_path,
+                alerts=alerts,
+            )
+            self._qidu_signal_interval = cfg.qidu_signal_poll_interval
 
     # ── lifecycle ──────────────────────────────────────────────────
 
@@ -390,31 +404,27 @@ class MainLoop:
             self._buffer.add(heartbeat.build_prompt(data))
         logger.info("heartbeat injected (anomalies=%d)", len(data.get("anomalies", [])))
 
-    _BOOK_SIGNAL = Path.home() / ".shared-reading" / "signal.json"
-
-    def _check_book_signal(self) -> None:
-        if not self._BOOK_SIGNAL.exists():
+    def _check_qidu_signal(self) -> None:
+        """Poll qidu book-server for pending signals. Internally throttled to
+        signal_poll_interval (5s) since tick() itself runs at ~1s cadence."""
+        if self._qidu_signal is None:
             return
-        if not hasattr(self, '_last_from_wxid') or self._last_from_wxid is None:
+        now = self._clock()
+        if now - self._last_qidu_signal_poll < self._qidu_signal_interval:
             return
-        try:
-            data = json.loads(self._BOOK_SIGNAL.read_text())
-            self._BOOK_SIGNAL.unlink(missing_ok=True)
-            prompt = data.get("prompt", "")
-            if prompt:
-                with self._state_lock:
-                    self._buffer.add(prompt)
-        except Exception as e:
-            logger.warning("book signal read failed: %s", e)
-            try:
-                self._BOOK_SIGNAL.unlink(missing_ok=True)
-            except Exception:
-                pass
+        self._last_qidu_signal_poll = now
+        if self._last_from_wxid is None:
+            return
+        if not self._qidu_signal.should_poll():
+            return
+        for text in self._qidu_signal.fetch():
+            with self._state_lock:
+                self._buffer.add(text)
 
     def tick(self) -> None:
         """One inbound poll: route bridge commands; buffer the rest for the provider."""
         self._check_heartbeat()
-        self._check_book_signal()
+        self._check_qidu_signal()
         try:
             msgs = self._ilink.poll_messages()
         except Exception as e:

@@ -52,6 +52,9 @@ api_base = ""
 token = ""
 poll_interval = 10.0
 max_concurrent = 2
+# Signal poller — polls cloud server for pending highlight/annotation
+# signals, injects them into whichever bridge 霜霜 is active on.
+signal_poll_interval = 5.0
 extract_script = "~/workshop/qidu/local/extract_book.py"
 
 [alerts]

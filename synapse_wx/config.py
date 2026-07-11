@@ -63,6 +63,7 @@ class Config:
     qidu_poll_interval: float = 10.0
     qidu_max_concurrent: int = 2
     qidu_extract_script: str = "~/workshop/qidu/local/extract_book.py"
+    qidu_signal_poll_interval: float = 5.0
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -141,7 +142,7 @@ def load_config(path: Path | None = None) -> Config:
             val = qidu.get(fname)
             if isinstance(val, str):
                 setattr(cfg, f"qidu_{fname}", val)
-        for fname in ("poll_interval",):
+        for fname in ("poll_interval", "signal_poll_interval"):
             val = qidu.get(fname)
             if isinstance(val, (int, float)) and val > 0:
                 setattr(cfg, f"qidu_{fname}", float(val))

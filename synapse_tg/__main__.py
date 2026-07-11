@@ -119,6 +119,7 @@ def main() -> int:
         sessions=sessions,
         record_session=_record_session,
         idle_loop=idle_loop,
+        alerts=alerts,
     )
     loop_box["loop"] = loop
     state = loop._state
@@ -271,7 +272,7 @@ def main() -> int:
     app.add_handler(MessageHandler(filters.VIDEO, loop.on_video))
     app.job_queue.run_repeating(loop.check_flush, interval=0.5, first=0.5)
     app.job_queue.run_repeating(loop.check_heartbeat, interval=15, first=10)
-    app.job_queue.run_repeating(loop.check_book_signal, interval=5, first=5)
+    app.job_queue.run_repeating(loop.check_qidu_signal, interval=cfg.qidu_signal_poll_interval, first=5)
     app.job_queue.run_repeating(loop.check_autonomous_turn, interval=3, first=5)
 
     async def _error_handler(update, context):
