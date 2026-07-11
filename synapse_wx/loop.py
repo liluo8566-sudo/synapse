@@ -200,6 +200,7 @@ class MainLoop:
                 api_base=cfg.qidu_api_base,
                 token=cfg.qidu_token,
                 channel="wx",
+                user_name=cfg.user_name,
                 last_active_path=self._last_active_path,
                 alerts=alerts,
             )

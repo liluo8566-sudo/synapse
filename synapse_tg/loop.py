@@ -129,6 +129,7 @@ class TgLoop:
                 api_base=cfg.qidu_api_base,
                 token=cfg.qidu_token,
                 channel="tg",
+                user_name=cfg.user_name,
                 alerts=alerts,
             )
         self._provider: ClaudeCodeProvider | None = None

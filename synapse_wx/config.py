@@ -23,6 +23,7 @@ class Config:
     target_wxid: str = ""
     marrow_repo_cmd: str = ""
     cc_cwd: str = ""  # cwd cc subprocess spawns in; empty = $HOME
+    user_name: str = ""  # [persona] display name for injected signal text
     # B1 sessions table. Empty = bridge runs without marrow session persistence
     # (no row written, /resume falls back to jsonl grep). Format strings get
     # {sid}, {model}, {channel} substituted.
@@ -103,6 +104,11 @@ def load_config(path: Path | None = None) -> Config:
         val = debug["raw_poll_log_until"]
         if isinstance(val, str):
             cfg.raw_poll_log_until = val
+    persona = data.get("persona") or {}
+    if isinstance(persona, dict) and "user_name" in persona:
+        val = persona["user_name"]
+        if isinstance(val, str):
+            cfg.user_name = val
     provider = data.get("provider") or {}
     if isinstance(provider, dict) and "cc_cwd" in provider:
         val = provider["cc_cwd"]
