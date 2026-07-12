@@ -119,6 +119,7 @@ def main() -> int:
         sessions=sessions,
         record_session=_record_session,
         idle_loop=idle_loop,
+        alerts=alerts,
     )
     loop_box["loop"] = loop
     state = loop._state

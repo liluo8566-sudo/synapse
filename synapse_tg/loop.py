@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from telegram import Bot, Update
+from telegram.error import RetryAfter
 from telegram.ext import ContextTypes
 
 from synapse_core import bridge_state_store
@@ -56,6 +57,8 @@ _MERGE_NOTE = (
 _SEND_GAP_SEC = 0.05
 _MAX_CONSECUTIVE_DEATHS = 3
 _FLUSH_INTERVAL_SEC = 0.5
+# Extra seconds added on top of a 429 RetryAfter before retrying the send.
+_RETRY_AFTER_MARGIN_SEC = 0.5
 
 # Streaming config
 _STREAM_EDIT_INTERVAL = 1.0   # seconds between intermediate edits
@@ -102,11 +105,13 @@ class TgLoop:
         sessions=None,
         record_session=None,
         idle_loop=None,
+        alerts=None,
     ) -> None:
         self._cfg = cfg
         self._sessions = sessions
         self._record_session = record_session
         self._idle_loop = idle_loop
+        self._alerts = alerts
         self._provider: ClaudeCodeProvider | None = None
         self._lock = asyncio.Lock()
         self._death_count = 0
@@ -692,6 +697,36 @@ class TgLoop:
             self._buffer.add(body)
             logger.debug("buffered video: %s", path)
 
+    async def _send_text_bubble(self, bot: Bot, send_kwargs: dict, fallback_kwargs: dict) -> bool:
+        """Send one text bubble with 429 RetryAfter handling and a plain-text
+        fallback. Returns True on success, False if the bubble was lost.
+
+        Never raises: a fallback failure is caught so it cannot kill the turn.
+        """
+
+        async def _attempt(kwargs: dict) -> bool:
+            attempts = max(1, self._cfg.send_retry_max)
+            for i in range(attempts):
+                try:
+                    await bot.send_message(**kwargs)
+                    return True
+                except RetryAfter as e:
+                    wait = float(getattr(e, "retry_after", 0)) or 0.0
+                    if wait > self._cfg.retry_after_cap_sec or i == attempts - 1:
+                        raise
+                    await asyncio.sleep(wait + _RETRY_AFTER_MARGIN_SEC)
+            return False
+
+        try:
+            return await _attempt(send_kwargs)
+        except Exception as e:
+            logger.warning("send_message failed, trying plain-text fallback: %s", e)
+        try:
+            return await _attempt(fallback_kwargs)
+        except Exception as e:
+            logger.warning("plain-text fallback send also failed: %s", e)
+            return False
+
     async def check_flush(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._buffer.ready() or self._pending_chat_id is None:
             return
@@ -807,7 +842,8 @@ class TgLoop:
                     pass
             skip_first_text = True
 
-        for bubble in bubbles:
+        total = len(bubbles)
+        for idx, bubble in enumerate(bubbles):
             if bubble["kind"] == "text":
                 if skip_first_text:
                     skip_first_text = False
@@ -817,16 +853,43 @@ class TgLoop:
                     text=gfm_to_tg_html(bubble["text"]),
                     parse_mode="HTML",
                 )
+                fallback_kwargs = dict(chat_id=chat_id, text=bubble["text"])
                 if reply_to_id is not None:
                     send_kwargs["reply_to_message_id"] = reply_to_id
+                    fallback_kwargs["reply_to_message_id"] = reply_to_id
                     reply_to_id = None
-                try:
-                    await bot.send_message(**send_kwargs)
-                except Exception:
-                    fallback_kwargs = dict(chat_id=chat_id, text=bubble["text"])
-                    await bot.send_message(**fallback_kwargs)
+                ok = await self._send_text_bubble(bot, send_kwargs, fallback_kwargs)
+                if not ok:
+                    lost = total - idx
+                    logger.warning(
+                        "send_message failed at bubble %d/%d — %d bubble(s) of the turn stopped",
+                        idx + 1, total, lost,
+                    )
+                    if self._alerts is not None:
+                        try:
+                            self._alerts.write(
+                                "warn",
+                                "tg_send_rejected",
+                                f"send_message failed at bubble {idx + 1}/{total}; "
+                                f"{lost} bubble(s) of the turn stopped",
+                                source="loop.check_flush",
+                                fingerprint="tg.send_rejected",
+                            )
+                        except Exception as ae:
+                            logger.warning("alerts.write failed: %s", ae)
+                    break
             else:
-                await send_media(bot, chat_id, bubble["kind"], bubble["path"], reply_to=reply_to_id)
+                ok = await send_media(
+                    bot, chat_id, bubble["kind"], bubble["path"],
+                    reply_to=reply_to_id,
+                    send_retry_max=self._cfg.send_retry_max,
+                    retry_after_cap_sec=self._cfg.retry_after_cap_sec,
+                )
+                if not ok:
+                    logger.warning(
+                        "send_media failed for bubble %d/%d (%s) — continuing",
+                        idx + 1, total, bubble["kind"],
+                    )
                 if reply_to_id is not None:
                     reply_to_id = None
             await asyncio.sleep(_SEND_GAP_SEC)

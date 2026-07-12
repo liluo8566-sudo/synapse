@@ -20,9 +20,14 @@ bubble_gap_sec = 0.8
 bubble_cap = 10
 
 [send]
-# On a business rejection (ret!=0 → iLink send count quota exhausted), wait
+# (wx) On a business rejection (ret!=0 → iLink send count quota exhausted), wait
 # this long (seconds) for the quota window to roll over, then retry once.
 quota_wait_sec = 65.0
+# (tg) Max attempts per outbound bubble on a 429 RetryAfter before giving up.
+send_retry_max = 2
+# (tg) If Telegram's RetryAfter exceeds this many seconds, skip the wait and
+# treat the send as failed instead of stalling the bridge.
+retry_after_cap_sec = 60.0
 
 # ── Shared ────────────────────────────────────────────
 [provider]

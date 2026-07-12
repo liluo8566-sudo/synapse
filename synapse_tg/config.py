@@ -36,6 +36,10 @@ class TgConfig:
     session_created_command: str = ""
     session_list_recent_command: str = ""
 
+    # Outbound send resilience
+    send_retry_max: int = 2
+    retry_after_cap_sec: float = 60.0
+
     # CWD presets
     cwd_presets: dict = field(default_factory=dict)
 
@@ -103,6 +107,13 @@ def load_config(path: Path | None = None) -> TgConfig:
             cfg.session_created_command = marrow["session_created_command"]
         if isinstance(marrow.get("session_list_recent_command"), str):
             cfg.session_list_recent_command = marrow["session_list_recent_command"]
+
+    send = data.get("send") or {}
+    if isinstance(send, dict):
+        if isinstance(send.get("send_retry_max"), int) and not isinstance(send.get("send_retry_max"), bool):
+            cfg.send_retry_max = send["send_retry_max"]
+        if isinstance(send.get("retry_after_cap_sec"), (int, float)) and not isinstance(send.get("retry_after_cap_sec"), bool):
+            cfg.retry_after_cap_sec = float(send["retry_after_cap_sec"])
 
     if isinstance(provider.get("cc_projects_dir"), str):
         cfg.cc_projects_dir = provider["cc_projects_dir"]
