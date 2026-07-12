@@ -357,3 +357,55 @@ def test_stream_final_edit_success_skips_bubble_zero_unchanged(tmp_path, monkeyp
     # Preview edited once (HTML path succeeds), bubble 0 NOT re-sent as a new message.
     assert len(bot.edits) == 1
     assert [m["text"] for m in bot.sent] == ["bubble two", "bubble three"]
+
+
+class NotModifiedBothBot(FakeBot):
+    """Both HTML and plain-text final edits fail with 'message is not modified'
+    (preview already matches bubble 0 — content was already delivered)."""
+
+    async def edit_message_text(self, **kwargs):
+        raise RuntimeError("Message is not modified")
+
+
+def test_stream_final_edit_not_modified_both_does_not_resend_bubble_zero(tmp_path, monkeypatch):
+    bot = NotModifiedBothBot()
+    loop = _stream_check_flush_loop(tmp_path, monkeypatch, bot)
+
+    class Ctx:
+        pass
+
+    Ctx.bot = bot
+
+    asyncio.run(loop.check_flush(Ctx()))
+
+    # bubble 0 already delivered via the streamed preview — must NOT be re-sent.
+    assert [m["text"] for m in bot.sent] == ["bubble two", "bubble three"]
+
+
+class NotModifiedHtmlOnlyBot(FakeBot):
+    """HTML final edit fails with 'message is not modified'; plain-text retry
+    must be skipped entirely (no second edit call)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.edit_calls = 0
+
+    async def edit_message_text(self, **kwargs):
+        self.edit_calls += 1
+        raise RuntimeError("Message is not modified")
+
+
+def test_stream_final_edit_not_modified_html_skips_plain_retry(tmp_path, monkeypatch):
+    bot = NotModifiedHtmlOnlyBot()
+    loop = _stream_check_flush_loop(tmp_path, monkeypatch, bot)
+
+    class Ctx:
+        pass
+
+    Ctx.bot = bot
+
+    asyncio.run(loop.check_flush(Ctx()))
+
+    # Only the HTML edit attempt runs — no fallthrough to a plain-text retry.
+    assert bot.edit_calls == 1
+    assert [m["text"] for m in bot.sent] == ["bubble two", "bubble three"]

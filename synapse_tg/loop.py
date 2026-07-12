@@ -866,16 +866,23 @@ class TgLoop:
                     text=gfm_to_tg_html(first), parse_mode="HTML",
                 )
                 skip_first_text = True
-            except Exception:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id, message_id=stream_msg_id, text=first,
-                    )
+            except Exception as html_exc:
+                if "message is not modified" in str(html_exc).lower():
+                    # Preview already matches bubble 0 — already delivered, not a failure.
                     skip_first_text = True
-                except Exception:
-                    logger.warning(
-                        "stream final edit failed — re-sending bubble 0 as new message"
-                    )
+                else:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=chat_id, message_id=stream_msg_id, text=first,
+                        )
+                        skip_first_text = True
+                    except Exception as plain_exc:
+                        if "message is not modified" in str(plain_exc).lower():
+                            skip_first_text = True
+                        else:
+                            logger.warning(
+                                "stream final edit failed — re-sending bubble 0 as new message"
+                            )
 
         total = len(bubbles)
         for idx, bubble in enumerate(bubbles):
