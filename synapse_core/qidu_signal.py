@@ -49,18 +49,59 @@ _TEMPLATES = {
         "继续回复必须用 book_annotate 且带上面的 parent_id,不带会断线程、也不会写入书里;"
         "先 book_annotate 写回,再在聊天里说也行"
     ),
+    "encourage": (
+        "[reading] {user_name}在《{book_title}》已经读了 15 分钟\n"
+        "(book_id={book_id} — 用 book_message 给她发条鼓励, message_type=\"encourage\")"
+    ),
+    "health": (
+        "[reading] {user_name}在《{book_title}》连读 {elapsed_min} 分钟了, 该护眼了\n"
+        "(book_id={book_id} — 用 book_message 提醒休息, message_type=\"health\")"
+    ),
+    "exit_intent": (
+        "[reading] {user_name}想退出《{book_title}》了 (发出于 {at}), 理由: {reasons}. "
+        "本次读了 {elapsed_min} 分钟\n"
+        "(book_id={book_id}, session_id={session_id} — 用 book_retention 挽留她, 前端只等 45 秒;\n"
+        " 这条如果已经过去几分钟以上, 她早走了, 不用再挽留)"
+    ),
+    "exit_result": (
+        "[reading] 她{result_text}, 本次共读 {elapsed_min} 分钟. (FYI, 无需工具操作)"
+    ),
+}
+
+
+def _derive_elapsed_min(payload: dict) -> dict:
+    return {"elapsed_min": payload["elapsed_seconds"] // 60}
+
+
+def _derive_exit_result(payload: dict) -> dict:
+    derived = _derive_elapsed_min(payload)
+    derived["result_text"] = "留下继续读了" if payload["stayed"] else "真的走了"
+    return derived
+
+
+_DERIVE = {
+    "encourage": _derive_elapsed_min,
+    "health": _derive_elapsed_min,
+    "exit_intent": _derive_elapsed_min,
+    "exit_result": _derive_exit_result,
 }
 
 
 def render_signal(event_type: str, payload: dict, user_name: str = _DEFAULT_USER_NAME) -> str | None:
     """Render one signal payload to injection text. Unknown event_type or
-    missing field → None (skip silently, logged)."""
+    missing field → None (skip silently, logged). Reading-type payloads run
+    through a per-type derive layer (_DERIVE) before formatting, adding
+    fields like elapsed_min the book-server doesn't send raw."""
     template = _TEMPLATES.get(event_type)
     if template is None:
         logger.warning("unknown signal event_type: %s", event_type)
         return None
     try:
-        return template.format(user_name=user_name or _DEFAULT_USER_NAME, **payload)
+        merged = dict(payload)
+        derive = _DERIVE.get(event_type)
+        if derive:
+            merged.update(derive(payload))
+        return template.format(user_name=user_name or _DEFAULT_USER_NAME, **merged)
     except KeyError as e:
         logger.warning("signal payload missing field %s for event_type=%s", e, event_type)
         return None

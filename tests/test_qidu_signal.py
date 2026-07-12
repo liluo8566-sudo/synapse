@@ -117,6 +117,74 @@ def test_render_missing_field_returns_none():
     assert render_signal("highlight", {"book_id": "bk-1"}) is None
 
 
+# ── render_signal: Phase 4 companion types (C-3 raw payloads) ──────────────
+
+def test_render_encourage_from_raw_payload():
+    text = render_signal("encourage", {
+        "book_id": "bk-1", "book_title": "书名", "session_id": 3,
+        "elapsed_seconds": 900,
+    }, "测试用户")
+    assert "book_id=bk-1" in text
+    assert "book_message" in text
+    assert 'message_type="encourage"' in text
+    assert "测试用户" in text
+    assert "书名" in text
+
+
+def test_render_health_derives_elapsed_min():
+    text = render_signal("health", {
+        "book_id": "bk-1", "book_title": "书名", "session_id": 3,
+        "elapsed_seconds": 3661,
+    }, "测试用户")
+    assert "连读 61 分钟" in text
+    assert "book_id=bk-1" in text
+    assert 'message_type="health"' in text
+
+
+def test_render_exit_intent_derives_elapsed_min():
+    text = render_signal("exit_intent", {
+        "book_id": "bk-1", "book_title": "书名", "session_id": 3,
+        "elapsed_seconds": 320, "reasons": "太困了, 眼睛累了",
+        "at": "22:15",
+    }, "测试用户")
+    assert "发出于 22:15" in text
+    assert "理由: 太困了, 眼睛累了" in text
+    assert "读了 5 分钟" in text
+    assert "book_id=bk-1, session_id=3" in text
+    assert "book_retention" in text
+
+
+def test_render_exit_result_stayed_true():
+    text = render_signal("exit_result", {
+        "book_id": "bk-1", "book_title": "书名", "session_id": 3,
+        "elapsed_seconds": 400, "stayed": True,
+    }, "测试用户")
+    assert "留下继续读了" in text
+    assert "本次共读 6 分钟" in text
+
+
+def test_render_exit_result_stayed_false():
+    text = render_signal("exit_result", {
+        "book_id": "bk-1", "book_title": "书名", "session_id": 3,
+        "elapsed_seconds": 400, "stayed": False,
+    }, "测试用户")
+    assert "真的走了" in text
+    assert "本次共读 6 分钟" in text
+
+
+def test_render_encourage_missing_elapsed_seconds_returns_none():
+    assert render_signal("encourage", {
+        "book_id": "bk-1", "book_title": "书名", "session_id": 3,
+    }) is None
+
+
+def test_render_exit_result_missing_stayed_returns_none():
+    assert render_signal("exit_result", {
+        "book_id": "bk-1", "book_title": "书名", "session_id": 3,
+        "elapsed_seconds": 400,
+    }) is None
+
+
 # ── fetch ────────────────────────────────────────────────────────────────────
 
 def test_fetch_renders_pending_signals(tmp_path):
