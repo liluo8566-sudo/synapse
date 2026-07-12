@@ -64,10 +64,11 @@ def test_render_highlight_contains_ids():
         "quoted_text": "原文片段",
     }, "测试用户")
     assert "bk-1" in text
-    assert "42" in text
+    assert "highlight_id=42" in text
     assert "原文片段" in text
     assert "book_annotate" in text
     assert "测试用户" in text
+    assert "不会出现在阅读器" in text
 
 
 def test_render_annotation_contains_annotation_text():
@@ -79,7 +80,10 @@ def test_render_annotation_contains_annotation_text():
     }, "测试用户")
     assert "批注内容" in text
     assert "annotation_id=7" in text
+    assert "parent_id=7" in text
+    assert "book_annotate" in text
     assert "测试用户" in text
+    assert "断线程" in text
 
 
 def test_render_reply_mentions_parent_id():
@@ -91,7 +95,9 @@ def test_render_reply_mentions_parent_id():
     }, "测试用户")
     assert "回复内容" in text
     assert "parent_id=9" in text
+    assert "book_annotate" in text
     assert "测试用户" in text
+    assert "断线程" in text
 
 
 def test_render_default_user_name_falls_back_to_generic():

@@ -29,19 +29,25 @@ _TEMPLATES = {
     "highlight": (
         "[reading] {user_name}在《{book_title}》({chapter_title}) 划了一段话:\n"
         "「{quoted_text}」\n"
-        "(book_id={book_id}, highlight_id={highlight_id} — 想批注就用 book_annotate)"
+        "(book_id={book_id}, highlight_id={highlight_id})\n"
+        "批注只能靠 book_annotate 工具写入书里,纯聊天回复不会出现在阅读器;"
+        "先 book_annotate 写回,再在聊天里说也行"
     ),
     "annotation": (
         "[reading] {user_name}在《{book_title}》划线并写了批注:\n"
         "原文:「{quoted_text}」\n"
         "批注:「{annotation_text}」\n"
-        "(book_id={book_id}, highlight_id={highlight_id}, annotation_id={annotation_id})"
+        "(book_id={book_id}, highlight_id={highlight_id}, annotation_id={annotation_id})\n"
+        "回复必须用 book_annotate 且带 parent_id={annotation_id},不带会断线程、也不会写入书里;"
+        "先 book_annotate 写回,再在聊天里说也行"
     ),
     "reply": (
         "[reading] {user_name}在《{book_title}》的批注 thread 里回复了你:\n"
         "原文:「{quoted_text}」\n"
         "她说:「{annotation_text}」\n"
-        "(book_id={book_id}, highlight_id={highlight_id}, 回复请带 parent_id={annotation_id})"
+        "(book_id={book_id}, highlight_id={highlight_id}, parent_id={annotation_id})\n"
+        "继续回复必须用 book_annotate 且带上面的 parent_id,不带会断线程、也不会写入书里;"
+        "先 book_annotate 写回,再在聊天里说也行"
     ),
 }
 
