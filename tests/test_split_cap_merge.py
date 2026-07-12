@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from synapse_wx.split import merge_bubbles_to_cap
+from synapse_wx.split import BUBBLE_JOIN_SEP, merge_bubbles_to_cap
 
 
 def _text(*texts: str) -> list[dict]:
@@ -23,7 +23,7 @@ def test_over_cap_text_merges_to_cap() -> None:
     assert len(out) == 2
     assert all(b["kind"] == "text" for b in out)
     # Every original fragment survives, in order.
-    joined = "\n".join(b["text"] for b in out)
+    joined = BUBBLE_JOIN_SEP.join(b["text"] for b in out)
     for frag in ("a", "b", "c", "d", "e"):
         assert frag in joined
     assert joined.index("a") < joined.index("e")
@@ -53,7 +53,7 @@ def test_media_bubbles_unmergeable_order_preserved() -> None:
     ]
     # t2 and t3 (adjacent text) merged into one bubble.
     texts = [b["text"] for b in out if b["kind"] == "text"]
-    assert "t2\nt3" in texts
+    assert f"t2{BUBBLE_JOIN_SEP}t3" in texts
     # image precedes video in the output.
     kinds = [b["kind"] for b in out]
     assert kinds.index("image") < kinds.index("video")
@@ -89,3 +89,20 @@ def test_char_ceiling_blocks_all_merges_leaves_over_cap() -> None:
     # Any merge would exceed 3900 → no merge happens, count stays at 3.
     assert len(out) == 3
     assert all(len(b["text"]) <= 3900 for b in out)
+
+
+def test_balanced_merge_spreads_across_pairs() -> None:
+    # 12 equal-length text bubbles, cap 10 → exactly 2 merges needed. The
+    # smallest-pair-first rule (tie → leftmost) should spread the two merges
+    # across different original pairs, not pile 3+ originals into one bubble.
+    bubbles = _text(*(f"msg{i:02d}" for i in range(12)))
+    out = merge_bubbles_to_cap(bubbles, cap=10)
+    assert len(out) == 10
+    for b in out:
+        # No merged bubble contains 3+ originals (i.e. 2+ separators).
+        assert b["text"].count(BUBBLE_JOIN_SEP) <= 1
+    # Every original fragment survives, in order.
+    joined = BUBBLE_JOIN_SEP.join(b["text"] for b in out)
+    for i in range(12):
+        assert f"msg{i:02d}" in joined
+    assert joined.index("msg00") < joined.index("msg11")

@@ -72,6 +72,11 @@ MAX_WX_BUBBLES = 99
 # would create extra messages and defeat the cap) is not triggered.
 MERGE_CHAR_CEILING = 3900
 
+# Separator for joining two adjacent text bubbles into one. iLink renders
+# "\n" inside a text_item as a space (no line break); U+2028 renders as a
+# real single line break (verified live 2026-07-12).
+BUBBLE_JOIN_SEP = "\u2028"
+
 # /thinking: emit cc's plaintext thinking as ONE wx bubble prefixed 🧠.
 # Test-drive: no splitting; we want to see how wx renders a long single
 # bubble (and whether iLink rejects it) before deciding on splitting.
@@ -320,7 +325,7 @@ def _text_to_bubbles(flat: str, hard_max: int) -> list[str]:
     # Cap text bubbles — merge trailing if over limit
     while len(bubbles) > MAX_WX_BUBBLES:
         last = bubbles.pop()
-        bubbles[-1] = bubbles[-1] + "\n" + last
+        bubbles[-1] = bubbles[-1] + BUBBLE_JOIN_SEP + last
     return [b for b in bubbles if b]
 
 
@@ -332,30 +337,36 @@ def merge_bubbles_to_cap(
 ) -> list[dict]:
     """Merge adjacent TEXT bubbles until ``len(bubbles) <= cap``.
 
-    Text bubbles (`{"kind": "text", ...}`) are joined with ``\\n`` into the
-    preceding text bubble. Media bubbles cannot merge — they keep their
-    positions and relative order. Merging stops early when no adjacent
-    text pair remains, or when the only remaining merge would grow a bubble
-    past ``char_ceiling`` (avoids the client's 4000-char re-split, which
-    would spawn extra messages and defeat the cap). Pure function: input is
-    not mutated.
+    Text bubbles (`{"kind": "text", ...}`) are joined with
+    ``BUBBLE_JOIN_SEP`` into the preceding text bubble. Media bubbles cannot
+    merge — they keep their positions and relative order. Each iteration
+    scans ALL adjacent text pairs and merges the one whose combined length
+    is smallest (ties → leftmost), so overflow spreads across bubbles
+    instead of piling onto the first pair. Merging stops early when no
+    adjacent text pair remains, or when the only remaining merge would grow
+    a bubble past ``char_ceiling`` (avoids the client's 4000-char re-split,
+    which would spawn extra messages and defeat the cap). Pure function:
+    input is not mutated.
     """
     out = [dict(b) for b in bubbles]
     while len(out) > cap:
-        merged_any = False
+        best_i = -1
+        best_len = None
         for i in range(len(out) - 1):
             a, b = out[i], out[i + 1]
             if a.get("kind") != "text" or b.get("kind") != "text":
                 continue
-            combined = f"{a['text']}\n{b['text']}"
-            if len(combined) > char_ceiling:
+            combined_len = len(a["text"]) + len(BUBBLE_JOIN_SEP) + len(b["text"])
+            if combined_len > char_ceiling:
                 continue
-            a["text"] = combined
-            del out[i + 1]
-            merged_any = True
+            if best_len is None or combined_len < best_len:
+                best_len = combined_len
+                best_i = i
+        if best_i < 0:
             break
-        if not merged_any:
-            break
+        a, b = out[best_i], out[best_i + 1]
+        a["text"] = f"{a['text']}{BUBBLE_JOIN_SEP}{b['text']}"
+        del out[best_i + 1]
     return out
 
 
