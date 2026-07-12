@@ -54,3 +54,11 @@ class BridgeState:
     # /cwd — current cwd cc subprocess spawns in. None = use DEFAULT_CC_CWD.
     # Persisted; survives bridge restart so the active project sticks.
     cc_cwd: str | None = None
+    # TG: chat_id of the last inbound message. Persisted so a bridge restart
+    # doesn't leave the loop's pending-chat-id amnesiac until the user's next
+    # TG message — periodic jobs (qidu signal poll, heartbeat) need a target
+    # to deliver to right after boot.
+    chat_id: int | None = None
+    # WX: wxid of the last inbound sender. Same amnesia problem as chat_id
+    # above, WeChat-flavored.
+    last_from_wxid: str | None = None

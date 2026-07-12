@@ -140,6 +140,9 @@ class TgLoop:
         self._bot: Bot | None = None
         self._state_path = cfg.data_dir / "bridge_state.json"
         self._state = self._load_state()
+        if self._state.chat_id is not None:
+            self._pending_chat_id = self._state.chat_id
+            logger.info("boot resume: restored pending_chat_id=%s", self._state.chat_id)
         self._registry = self._build_registry()
         self._queued_extra_bubbles: list[str] = []
         self._pending_user_id: int | None = None
@@ -644,6 +647,9 @@ class TgLoop:
     def _track(self, bot: Bot, chat_id: int, user_id: int | None = None) -> None:
         self._bot = bot
         self._pending_chat_id = chat_id
+        if self._state.chat_id != chat_id:
+            self._state.chat_id = chat_id
+            self._persist_state()
         if user_id is not None:
             self._pending_user_id = user_id
             if self._turn_user_id is not None and user_id == self._turn_user_id:
@@ -653,6 +659,8 @@ class TgLoop:
     _LAST_ACTIVE_PATH = Path.home() / ".config" / "marrow" / "last_active.json"
 
     async def check_heartbeat(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self._bot is None:
+            self._bot = context.bot
         if not self._HB_SIGNAL.exists():
             return
         if self._pending_chat_id is None:
@@ -677,6 +685,8 @@ class TgLoop:
         logger.info("heartbeat injected (anomalies=%d)", len(data.get("anomalies", [])))
 
     async def check_qidu_signal(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self._bot is None:
+            self._bot = context.bot
         if self._qidu_signal is None:
             return
         if self._pending_chat_id is None:
@@ -799,6 +809,8 @@ class TgLoop:
             logger.debug("buffered video: %s", path)
 
     async def check_flush(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self._bot is None:
+            self._bot = context.bot
         if not self._buffer.ready() or self._pending_chat_id is None:
             return
         bot = self._bot or context.bot

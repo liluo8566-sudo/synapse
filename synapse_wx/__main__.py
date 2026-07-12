@@ -260,6 +260,7 @@ def main() -> int:
         channel=CHANNEL,
         last_active_path=LAST_ACTIVE_PATH,
         channel_label=CHANNEL_LABEL,
+        persist_state=_save_state,
     )
     # B11: resolve the closure so idle-fire can close the live provider.
     main_loop_box["loop"] = main_loop

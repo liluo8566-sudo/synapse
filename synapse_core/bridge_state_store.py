@@ -1,10 +1,15 @@
 """Persist a tiny slice of BridgeState across bridge crashes.
 
-Only `effort_level`, `thinking_on`, `quote_on` are persisted — everything else
-is session-scoped and a crash should reset it. `model` is intentionally NOT
+Only `effort_level`, `thinking_on`, `quote_on`, `voice_style`, `cc_cwd`,
+`session_id`, `chat_id`, `last_from_wxid` are persisted — everything else is
+session-scoped and a crash should reset it. `model` is intentionally NOT
 persisted: bridge starts on the caller's configured default model, ``/resume
 <sid>`` pulls the historic model from marrow.sessions, and ``/swap`` sets it
 for the current session only. The caller owns the storage path.
+
+`chat_id` / `last_from_wxid` restore the loop's delivery target after a
+restart so periodic jobs (qidu signal poll, heartbeat) aren't stuck waiting
+for the user's next inbound message before they can act.
 
 The file write uses :func:`marrow._atomic.atomic_write` when marrow is
 importable; otherwise it falls back to a tempfile + ``os.replace`` pattern so
@@ -28,6 +33,8 @@ PERSISTED_KEYS: tuple[str, ...] = (
     "voice_style",
     "cc_cwd",
     "session_id",
+    "chat_id",
+    "last_from_wxid",
 )
 
 

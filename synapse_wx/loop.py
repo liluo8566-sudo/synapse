@@ -120,10 +120,12 @@ class MainLoop:
         last_active_path: Path,
         channel_label: str,
         media_dir: Path = DEFAULT_MEDIA_DIR,
+        persist_state: Callable[[], None] | None = None,
     ) -> None:
         self._ilink = ilink
         self._provider_factory = provider_factory
         self.state = state
+        self._persist_state = persist_state
         self._sessions = sessions
         self._idle_loop = idle_loop
         self._buffer = buffer if buffer is not None else InboundBuffer(clock=clock)
@@ -144,7 +146,7 @@ class MainLoop:
         self._channel_label = channel_label
 
         self._provider: Provider | None = None
-        self._last_from_wxid: str | None = None
+        self._last_from_wxid: str | None = self.state.last_from_wxid
         self._last_ctx_token: str = ""
         self._paused = False
         # C0: accumulate per-turn inbound media events (image/voice/pdf/video).
@@ -452,6 +454,10 @@ class MainLoop:
             with self._state_lock:
                 if from_wxid:
                     self._last_from_wxid = from_wxid
+                    if self.state.last_from_wxid != from_wxid:
+                        self.state.last_from_wxid = from_wxid
+                        if self._persist_state is not None:
+                            self._persist_state()
                 if ctx_token:
                     self._last_ctx_token = ctx_token
             try:
