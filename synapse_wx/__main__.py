@@ -216,6 +216,8 @@ def main() -> int:
             system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, WX_ICLOUD_PROMPT, WX_STICKER_PROMPT, WX_BUBBLE_FORMAT_PROMPT, NIGHT_SYSTEM_PROMPT],
             marrow_bridge=True,
             channel=CHANNEL,
+            idle_soft_s=cfg.idle_soft_s,
+            idle_hard_s=cfg.idle_hard_s,
         )
 
     main_loop = MainLoop(

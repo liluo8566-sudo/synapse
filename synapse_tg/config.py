@@ -20,6 +20,11 @@ class TgConfig:
     marrow_bridge: bool = False
     cwd: Path | None = None
     default_model: str = "claude-opus-4-6[1m]"
+
+    # Provider liveness: seconds of continuous stream silence before the soft
+    # liveness check (poll process) and the hard idle kill (stall -> respawn).
+    idle_soft_s: float = 60.0
+    idle_hard_s: float = 300.0
     user_name: str = "user"
     assistant_name: str = "assistant"
 
@@ -72,6 +77,12 @@ def load_config(path: Path | None = None) -> TgConfig:
             cfg.cwd = Path(provider["cwd"])
         if isinstance(provider.get("marrow_bridge"), bool):
             cfg.marrow_bridge = provider["marrow_bridge"]
+        soft = provider.get("idle_soft_s")
+        if isinstance(soft, (int, float)) and not isinstance(soft, bool) and soft > 0:
+            cfg.idle_soft_s = float(soft)
+        hard = provider.get("idle_hard_s")
+        if isinstance(hard, (int, float)) and not isinstance(hard, bool) and hard > 0:
+            cfg.idle_hard_s = float(hard)
 
     storage = data.get("storage") or {}
     if isinstance(storage, dict):

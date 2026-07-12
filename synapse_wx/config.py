@@ -34,6 +34,10 @@ class Config:
     target_wxid: str = ""
     marrow_repo_cmd: str = ""
     cc_cwd: str = ""  # cwd cc subprocess spawns in; empty = $HOME
+    # Provider liveness: seconds of continuous stream silence before the soft
+    # liveness check (poll process) and the hard idle kill (stall -> respawn).
+    idle_soft_s: float = 60.0
+    idle_hard_s: float = 300.0
     # B1 sessions table. Empty = bridge runs without marrow session persistence
     # (no row written, /resume falls back to jsonl grep). Format strings get
     # {sid}, {model}, {channel} substituted.
@@ -122,6 +126,13 @@ def load_config(path: Path | None = None) -> Config:
         val = provider["cc_cwd"]
         if isinstance(val, str):
             cfg.cc_cwd = val
+    if isinstance(provider, dict):
+        soft = provider.get("idle_soft_s")
+        if isinstance(soft, (int, float)) and not isinstance(soft, bool) and soft > 0:
+            cfg.idle_soft_s = float(soft)
+        hard = provider.get("idle_hard_s")
+        if isinstance(hard, (int, float)) and not isinstance(hard, bool) and hard > 0:
+            cfg.idle_hard_s = float(hard)
     if isinstance(session, dict):
         for field_name in (
             "session_record_command",

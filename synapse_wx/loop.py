@@ -515,22 +515,36 @@ class MainLoop:
             instruction = build_read_tool_instruction(media_paths)
             assembled = f"{assembled}\n\n{instruction}" if assembled else instruction
 
-        try:
-            # Lazy typing: fire indicator at the moment cc actually starts
-            # thinking — NOT during the debounce buffer wait. Showing
-            # "正在输入中" while the bridge is silently buffering would be
-            # misleading: cc isn't working yet.
-            if from_wxid and self._typing_ping is None:
-                self._typing_ping = TypingPing(
-                    self._ilink, from_wxid, ctx_token, interval=5.0
-                )
-                self._typing_ping.start()
-            self._provider.send(assembled)
-            reply_text = self._drain_recv()
-        except ProviderDeadError as e:
-            self._stop_typing()
-            self._handle_provider_dead(e, from_wxid, ctx_token)
-            return
+        # Retry-once: a mid-turn stall/death respawns resuming the same sid and
+        # re-sends the SAME body ONCE. Second failure -> _handle_provider_dead
+        # (alert + user bubble). Outbound only fires from completed events, so a
+        # retried turn double-sends nothing.
+        reply_text = None
+        for attempt in range(2):
+            try:
+                # Lazy typing: fire indicator at the moment cc actually starts
+                # thinking — NOT during the debounce buffer wait. Showing
+                # "正在输入中" while the bridge is silently buffering would be
+                # misleading: cc isn't working yet.
+                if from_wxid and self._typing_ping is None:
+                    self._typing_ping = TypingPing(
+                        self._ilink, from_wxid, ctx_token, interval=5.0
+                    )
+                    self._typing_ping.start()
+                self._provider.send(assembled)
+                reply_text = self._drain_recv()
+                break
+            except ProviderDeadError as e:
+                if attempt == 0:
+                    logger.warning("provider dead mid-turn, retrying once: %s", e)
+                    if not self._ensure_provider():
+                        self._stop_typing()
+                        self._handle_provider_dead(e, from_wxid, ctx_token)
+                        return
+                    continue
+                self._stop_typing()
+                self._handle_provider_dead(e, from_wxid, ctx_token)
+                return
 
         # B6: stamp the cross-channel last-active pointer once we have a sid.
         # Best-effort; never blocks the outbound path.

@@ -58,22 +58,12 @@ class DeadOnSendProvider:
     def is_alive(self) -> bool:
         return self.alive
 
-    def kill(self) -> None:
+    def cancel(self) -> None:
         self.killed = True
         self.alive = False
 
-
-class SpawnedProvider:
-    session_id = None
-
-    def __init__(self) -> None:
-        self.spawned = False
-
-    def spawn(self) -> None:
-        self.spawned = True
-
-    def is_alive(self) -> bool:
-        return self.spawned
+    # Back-compat alias; loop uses cancel().
+    kill = cancel
 
 
 def _loop_with_body(tmp_path: Path, clock: FakeClock, body: str = "hello") -> TgLoop:
@@ -102,18 +92,28 @@ def test_tg_provider_gives_up_after_max_deaths_without_requeue(tmp_path: Path) -
 
 
 def test_tg_provider_restart_notice_failure_does_not_crash(tmp_path: Path) -> None:
+    """Retry-once: both attempts die, notice send fails — must not crash, and
+    the body is re-queued for a later flush."""
     clock = FakeClock()
     loop = _loop_with_body(tmp_path, clock)
     old_provider = DeadOnSendProvider()
-    new_provider = SpawnedProvider()
+    respawned: list[DeadOnSendProvider] = []
+
+    def _make() -> DeadOnSendProvider:
+        p = DeadOnSendProvider()
+        respawned.append(p)
+        return p
+
     loop._provider = old_provider  # type: ignore[assignment]
-    loop._make_provider = lambda: new_provider  # type: ignore[method-assign]
+    loop._make_provider = _make  # type: ignore[method-assign]
     bot = FakeBot(fail_messages=True)
 
     asyncio.run(loop.check_flush(FakeContext(bot)))  # type: ignore[arg-type]
 
-    assert loop._death_count == 1
+    # Two deaths -> two respawns (attempt 0 + attempt 1), still under the cap.
+    assert loop._death_count == 2
     assert old_provider.killed
-    assert loop._provider is new_provider
-    assert new_provider.spawned
+    # A fresh provider was spawned for the retry.
+    assert respawned and respawned[-1].spawned
+    # Body handed back to the buffer for a future flush.
     assert loop._buffer.flush() == "hello"

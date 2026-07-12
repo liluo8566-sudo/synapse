@@ -3,15 +3,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
+import signal
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .base import Provider
-from .errors import ProviderDeadError, ProviderSpawnError
+from .errors import ProviderDeadError, ProviderSpawnError, ProviderStallError
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +50,30 @@ _USAGE_KEYS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
+
+# Liveness defaults (seconds of CONTINUOUS silence between stream events).
+# Overridable per bridge via config.toml; bridges pass explicit values.
+_DEFAULT_IDLE_SOFT_S = 60.0
+_DEFAULT_IDLE_HARD_S = 300.0
+
+# Sentinel objects for the stdout reader queue: EOF = clean stream end,
+# an Exception instance = a read error surfaced to recv().
+_STDOUT_EOF = object()
+
+
+def _read_stdout_to_queue(stdout_pipe, q: "queue.Queue") -> None:
+    """Daemon thread: push each raw stdout line onto q; _STDOUT_EOF on EOF.
+
+    Lets recv() apply a timed get() so a wedged-but-alive subprocess (no
+    output, process still running) is detected instead of blocking forever.
+    """
+    try:
+        for line in stdout_pipe:
+            q.put(line)
+    except Exception as exc:  # pragma: no cover - defensive
+        q.put(exc)
+    finally:
+        q.put(_STDOUT_EOF)
 
 # E-polish outbound quote v3: teach cc the bridge-specific <quote> protocol.
 # Injected once per session via --append-system-prompt so cc emits the tag
@@ -114,6 +141,8 @@ class ClaudeCodeProvider(Provider):
         stderr_log: Path | None = None,
         system_prompts: list[str] = (),
         marrow_bridge: bool = False,
+        idle_soft_s: float = _DEFAULT_IDLE_SOFT_S,
+        idle_hard_s: float = _DEFAULT_IDLE_HARD_S,
     ) -> None:
         self.model = model
         self.resume_sid = resume_sid
@@ -128,10 +157,15 @@ class ClaudeCodeProvider(Provider):
         self.system_prompts = list(system_prompts)
         self.marrow_bridge = marrow_bridge
         self.channel = channel
+        self.idle_soft_s = idle_soft_s
+        self.idle_hard_s = idle_hard_s
         self.process: subprocess.Popen[str] | None = None
         self.alive: bool = False
         self.session_id: str | None = None
         self.usage_total: dict[str, int] = {}
+        # Populated in spawn(): stdout reader thread + its handoff queue.
+        self._stdout_q: queue.Queue | None = None
+        self._reader_thread: threading.Thread | None = None
 
     def _build_cmd(self) -> list[str]:
         cmd = [
@@ -188,6 +222,16 @@ class ClaudeCodeProvider(Provider):
         except OSError as e:
             raise ProviderSpawnError(f"claude spawn failed: {e}") from e
         self.alive = True
+        # Non-blocking stdout consumption: a daemon reader pushes lines onto a
+        # queue so recv() can time each get() and measure continuous silence.
+        self._stdout_q = queue.Queue()
+        self._reader_thread = threading.Thread(
+            target=_read_stdout_to_queue,
+            args=(self.process.stdout, self._stdout_q),
+            name="cc-stdout-reader",
+            daemon=True,
+        )
+        self._reader_thread.start()
         if self.stderr_log is not None:
             t = threading.Thread(
                 target=_drain_stderr,
@@ -221,12 +265,55 @@ class ClaudeCodeProvider(Provider):
         """
         self.send(text)
 
+    def _next_line(self) -> Any:
+        """Block for the next stdout line, enforcing the idle liveness policy.
+
+        Measures CONTINUOUS silence: the deadline is reset by the caller each
+        time a line arrives (a fresh _next_line call starts a new clock).
+        - At idle_soft_s of silence: poll the subprocess. Dead -> ProviderDead;
+          alive -> keep waiting (self-heal window for a slow tool call).
+        - At idle_hard_s of silence: process-group kill, raise ProviderStall.
+        Returns the raw line, or _STDOUT_EOF on clean stream end.
+        """
+        assert self._stdout_q is not None
+        start = time.monotonic()
+        soft_checked = False
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= self.idle_hard_s:
+                self._kill_process_group()
+                raise ProviderStallError(
+                    f"no stream event for {self.idle_hard_s:.0f}s (stall)"
+                )
+            # Wake at the next boundary (soft check, else hard deadline).
+            if not soft_checked and elapsed < self.idle_soft_s:
+                wait = self.idle_soft_s - elapsed
+            else:
+                wait = self.idle_hard_s - elapsed
+            try:
+                item = self._stdout_q.get(timeout=max(0.0, wait))
+            except queue.Empty:
+                if not soft_checked:
+                    soft_checked = True
+                    if self.process is not None and self.process.poll() is not None:
+                        self.alive = False
+                        raise ProviderDeadError(
+                            "subprocess died during recv (soft check)"
+                        )
+                continue
+            if isinstance(item, Exception):
+                raise ProviderDeadError(f"stdout read error: {item}") from item
+            return item
+
     def recv(self) -> Iterator[dict[str, Any]]:
-        if not self.alive or self.process is None or self.process.stdout is None:
+        if not self.alive or self.process is None or self._stdout_q is None:
             raise ProviderDeadError("subprocess not alive")
         saw_result = False
-        for line in self.process.stdout:
-            line = line.strip()
+        while True:
+            item = self._next_line()
+            if item is _STDOUT_EOF:
+                break
+            line = item.strip()
             if not line:
                 continue
             try:
@@ -251,6 +338,29 @@ class ClaudeCodeProvider(Provider):
                 break
         if not saw_result:
             raise ProviderDeadError("subprocess died during recv")
+
+    def _kill_process_group(self) -> None:
+        """SIGKILL the whole process group (spawned with start_new_session).
+
+        Used on hard stall: the subprocess is alive but wedged, so a plain
+        terminate() may not reap child tool processes. Mirrors the intent of
+        cancel()/close() but guarantees the group dies immediately.
+        """
+        self.alive = False
+        p = self.process
+        if p is None:
+            return
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                p.kill()
+            except Exception:
+                pass
+        try:
+            p.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
 
     def send_control_response(
         self, request_id: str, behavior: str, payload: dict[str, Any]

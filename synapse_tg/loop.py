@@ -86,7 +86,13 @@ TG_BUBBLE_FORMAT_PROMPT = (
 
 
 def _recv_to_queue(provider: ClaudeCodeProvider, q: "queue.Queue") -> None:
-    """Background thread: drain provider.recv() into a queue. Sentinel = None."""
+    """Background thread: drain provider.recv() into a queue. Sentinel = None.
+
+    The provider owns liveness now (soft check + hard idle kill in recv), so a
+    stall/death surfaces as an exception put on the queue — no per-turn queue
+    timeout here. The async consumer blocks on q.get() until an event, the
+    exception, or the None sentinel arrives.
+    """
     try:
         for ev in provider.recv():
             q.put(ev)
@@ -261,6 +267,8 @@ class TgLoop:
             effort_level=state.effort_level,
             stderr_log=Path.home() / "Library/Logs/synapse-tg-cc-stderr.log",
             system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, NIGHT_SYSTEM_PROMPT],
+            idle_soft_s=cfg.idle_soft_s,
+            idle_hard_s=cfg.idle_hard_s,
         )
 
     def ensure_provider(self) -> None:
@@ -374,11 +382,9 @@ class TgLoop:
         loop = asyncio.get_event_loop()
 
         while True:
-            try:
-                ev = await loop.run_in_executor(None, lambda: q.get(timeout=60))
-            except queue.Empty:
-                logger.warning("stream: queue timeout — treating as dead")
-                raise ProviderDeadError("recv queue timeout")
+            # No queue timeout: the provider's own liveness logic (soft check +
+            # hard idle kill) surfaces stall/death as an exception on the queue.
+            ev = await loop.run_in_executor(None, q.get)
 
             if ev is None:
                 # Sentinel: thread finished cleanly
@@ -744,29 +750,44 @@ class TgLoop:
 
         async with self._lock:
             try:
-                self.ensure_provider()
-                assert self._provider is not None
-                typing.start()
-                await asyncio.to_thread(self._provider.send, body)
-                response, thinking, stream_msg_id = await self._stream_response(bot, chat_id, typing)
-                if self._provider and self._provider.session_id:
-                    if self._state.session_id != self._provider.session_id:
-                        self._state.session_id = self._provider.session_id
-                        self._persist_state()
-            except ProviderDeadError as e:
-                if self._user_initiated_close:
-                    self._user_initiated_close = False
-                    return
-                logger.error("provider error: %s", e)
-                self._respawn()
-                if self._death_count >= _MAX_CONSECUTIVE_DEATHS:
-                    logger.error("provider gave up after %d consecutive deaths", self._death_count)
-                    self._provider = None
-                    await self._send_provider_notice(bot, chat_id, "provider.gave_up")
-                    return
-                self._buffer.prepend(body)
-                await self._send_provider_notice(bot, chat_id, "provider.restarting")
-                return
+                # Retry-once: on a mid-turn stall/death, respawn resuming the
+                # same sid and re-send the SAME body ONCE. Second failure ->
+                # user-facing notice. Bridges emit outbound only from completed
+                # events, so a retried turn double-sends nothing; any partially
+                # flushed stream bubble is abandoned (stream_msg_id reset below).
+                response = thinking = None
+                stream_msg_id = None
+                for attempt in range(2):
+                    try:
+                        self.ensure_provider()
+                        assert self._provider is not None
+                        typing.start()
+                        await asyncio.to_thread(self._provider.send, body)
+                        response, thinking, stream_msg_id = await self._stream_response(bot, chat_id, typing)
+                        if self._provider and self._provider.session_id:
+                            if self._state.session_id != self._provider.session_id:
+                                self._state.session_id = self._provider.session_id
+                                self._persist_state()
+                        break
+                    except ProviderDeadError as e:
+                        if self._user_initiated_close:
+                            self._user_initiated_close = False
+                            return
+                        logger.error("provider error (attempt %d/2): %s", attempt + 1, e)
+                        self._respawn()
+                        if self._death_count >= _MAX_CONSECUTIVE_DEATHS:
+                            logger.error("provider gave up after %d consecutive deaths", self._death_count)
+                            self._provider = None
+                            await self._send_provider_notice(bot, chat_id, "provider.gave_up")
+                            return
+                        if attempt == 0:
+                            # Abandon any partial stream bubble; retry cleanly.
+                            stream_msg_id = None
+                            continue
+                        # Second failure: hand back to the buffer + notice.
+                        self._buffer.prepend(body)
+                        await self._send_provider_notice(bot, chat_id, "provider.restarting")
+                        return
             except Exception as e:
                 logger.error("unexpected error: %s", e)
                 await bot.send_message(chat_id=chat_id, text=messages.t("bridge.error", self._state.voice_style))
