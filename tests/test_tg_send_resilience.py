@@ -40,6 +40,9 @@ class FakeBot:
     async def send_chat_action(self, **_kwargs):
         return None
 
+    async def edit_message_text(self, **kwargs):
+        return type("SentMessage", (), {"message_id": kwargs.get("message_id")})()
+
     async def send_photo(self, **kwargs):
         self.media.append(("photo", kwargs))
         return type("SentMessage", (), {"message_id": 1})()
@@ -266,3 +269,91 @@ class _FakeClock:
 
     def __call__(self) -> float:
         return self.now
+
+
+# --- stream final-edit handoff --------------------------------------------
+
+def _stream_check_flush_loop(tmp_path, monkeypatch, bot, alerts=None):
+    """Drive check_flush with a streaming stream_msg_id set, three text bubbles."""
+    clock = _FakeClock()
+    loop = _loop(tmp_path, alerts=alerts)
+    loop._buffer = InboundBuffer(clock=clock)
+    loop._buffer.add("hello")
+    clock.now += 60.0
+    loop._pending_chat_id = 123
+    loop._bot = bot
+
+    monkeypatch.setattr(loop, "ensure_provider", lambda: None)
+    loop._provider = type("P", (), {"session_id": None, "send": lambda self, b: None})()
+
+    async def fake_stream(bot_, chat_id, typing):
+        return "bubble one\n\nbubble two\n\nbubble three", "", 999  # stream_msg_id=999
+
+    monkeypatch.setattr(loop, "_stream_response", fake_stream)
+    monkeypatch.setattr("synapse_tg.loop.asyncio.to_thread", _immediate)
+    monkeypatch.setattr(
+        "synapse_tg.loop.split_for_tg_typed",
+        lambda text: [
+            {"kind": "text", "text": "bubble one"},
+            {"kind": "text", "text": "bubble two"},
+            {"kind": "text", "text": "bubble three"},
+        ],
+    )
+    return loop
+
+
+class EditFailBot(FakeBot):
+    """Both HTML and plain-text final edits fail; normal sends succeed."""
+
+    async def edit_message_text(self, **kwargs):
+        raise RuntimeError("message to edit not found")
+
+
+def test_stream_final_edit_failure_resends_bubble_zero_as_new_message(tmp_path, monkeypatch, caplog):
+    bot = EditFailBot()
+    loop = _stream_check_flush_loop(tmp_path, monkeypatch, bot)
+
+    class Ctx:
+        pass
+
+    Ctx.bot = bot
+
+    with caplog.at_level("WARNING", logger="synapse_tg.loop"):
+        asyncio.run(loop.check_flush(Ctx()))
+
+    # bubble 0 was sent as a fresh message (not silently dropped), remaining
+    # bubbles proceed in order.
+    assert [m["text"] for m in bot.sent] == [
+        "bubble one",  # gfm_to_tg_html passthrough for plain text
+        "bubble two",
+        "bubble three",
+    ]
+    assert any(
+        "stream final edit failed" in r.message for r in caplog.records
+    )
+
+
+class EditOkBot(FakeBot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.edits: list[dict] = []
+
+    async def edit_message_text(self, **kwargs):
+        self.edits.append(kwargs)
+        return type("M", (), {"message_id": kwargs.get("message_id")})()
+
+
+def test_stream_final_edit_success_skips_bubble_zero_unchanged(tmp_path, monkeypatch):
+    bot = EditOkBot()
+    loop = _stream_check_flush_loop(tmp_path, monkeypatch, bot)
+
+    class Ctx:
+        pass
+
+    Ctx.bot = bot
+
+    asyncio.run(loop.check_flush(Ctx()))
+
+    # Preview edited once (HTML path succeeds), bubble 0 NOT re-sent as a new message.
+    assert len(bot.edits) == 1
+    assert [m["text"] for m in bot.sent] == ["bubble two", "bubble three"]

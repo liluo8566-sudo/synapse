@@ -825,6 +825,8 @@ class TgLoop:
         text_bubbles = [b for b in bubbles if b["kind"] == "text"]
 
         # Edit streaming preview in-place to first bubble, then append the rest.
+        # If the final handoff edit fails entirely, fall through and send bubble 0
+        # as a fresh message instead of silently dropping it.
         skip_first_text = False
         if stream_msg_id is not None and text_bubbles:
             first = text_bubbles[0]["text"]
@@ -833,14 +835,17 @@ class TgLoop:
                     chat_id=chat_id, message_id=stream_msg_id,
                     text=gfm_to_tg_html(first), parse_mode="HTML",
                 )
+                skip_first_text = True
             except Exception:
                 try:
                     await bot.edit_message_text(
                         chat_id=chat_id, message_id=stream_msg_id, text=first,
                     )
+                    skip_first_text = True
                 except Exception:
-                    pass
-            skip_first_text = True
+                    logger.warning(
+                        "stream final edit failed — re-sending bubble 0 as new message"
+                    )
 
         total = len(bubbles)
         for idx, bubble in enumerate(bubbles):
