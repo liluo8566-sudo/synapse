@@ -38,6 +38,9 @@ class Config:
     # liveness check (poll process) and the hard idle kill (stall -> respawn).
     idle_soft_s: float = 60.0
     idle_hard_s: float = 300.0
+    # Per-turn OUTPUT token brake: interrupt a runaway turn instead of burning
+    # quota. 0 or negative disables.
+    turn_output_cap: int = 30000
     # B1 sessions table. Empty = bridge runs without marrow session persistence
     # (no row written, /resume falls back to jsonl grep). Format strings get
     # {sid}, {model}, {channel} substituted.
@@ -133,6 +136,9 @@ def load_config(path: Path | None = None) -> Config:
         hard = provider.get("idle_hard_s")
         if isinstance(hard, (int, float)) and not isinstance(hard, bool) and hard > 0:
             cfg.idle_hard_s = float(hard)
+        cap = provider.get("turn_output_cap")
+        if isinstance(cap, int) and not isinstance(cap, bool):
+            cfg.turn_output_cap = cap
     if isinstance(session, dict):
         for field_name in (
             "session_record_command",

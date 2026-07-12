@@ -269,6 +269,7 @@ class TgLoop:
             system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, NIGHT_SYSTEM_PROMPT],
             idle_soft_s=cfg.idle_soft_s,
             idle_hard_s=cfg.idle_hard_s,
+            turn_output_cap=cfg.turn_output_cap,
         )
 
     def ensure_provider(self) -> None:
@@ -794,6 +795,14 @@ class TgLoop:
                 return
             finally:
                 typing.stop()
+
+        # Turn output cap: the provider interrupted a runaway turn (brake, not
+        # a failure — no retry). Notify the user; the partial reply below still
+        # ships. Notice fires once per capped turn.
+        if self._provider is not None and getattr(
+            self._provider, "turn_output_capped", False
+        ):
+            await self._send_provider_notice(bot, chat_id, "provider.turn_capped")
 
         # Pre-send merge: only if the SAME sender sent new messages while thinking.
         # Other users' messages (group chat) never interrupt the current reply.

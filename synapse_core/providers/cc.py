@@ -56,6 +56,13 @@ _USAGE_KEYS = (
 _DEFAULT_IDLE_SOFT_S = 60.0
 _DEFAULT_IDLE_HARD_S = 300.0
 
+# Per-turn OUTPUT token brake: cancel a runaway turn (e.g. a huge thinking
+# spiral) instead of burning quota for 15 minutes. Overridable per bridge via
+# config.toml; 0 or negative disables. Counts ONLY newly produced output
+# tokens for the current turn — never input/cache figures (those reflect
+# window size and would false-trigger every turn).
+_DEFAULT_TURN_OUTPUT_CAP = 30000
+
 # Sentinel objects for the stdout reader queue: EOF = clean stream end,
 # an Exception instance = a read error surfaced to recv().
 _STDOUT_EOF = object()
@@ -143,6 +150,7 @@ class ClaudeCodeProvider(Provider):
         marrow_bridge: bool = False,
         idle_soft_s: float = _DEFAULT_IDLE_SOFT_S,
         idle_hard_s: float = _DEFAULT_IDLE_HARD_S,
+        turn_output_cap: int = _DEFAULT_TURN_OUTPUT_CAP,
     ) -> None:
         self.model = model
         self.resume_sid = resume_sid
@@ -159,10 +167,18 @@ class ClaudeCodeProvider(Provider):
         self.channel = channel
         self.idle_soft_s = idle_soft_s
         self.idle_hard_s = idle_hard_s
+        self.turn_output_cap = turn_output_cap
         self.process: subprocess.Popen[str] | None = None
         self.alive: bool = False
         self.session_id: str | None = None
         self.usage_total: dict[str, int] = {}
+        # Per-turn output cap state (reset at the start of every recv()).
+        # turn_output_capped: sticky flag the loop layer reads after the turn
+        # to send a "interrupted by the token cap" notice. NO retry on breach.
+        # _turn_output_by_request: max output_tokens seen per requestId within
+        # this turn; the current-turn total is the sum of these values.
+        self.turn_output_capped: bool = False
+        self._turn_output_by_request: dict[str, int] = {}
         # Populated in spawn(): stdout reader thread + its handoff queue.
         self._stdout_q: queue.Queue | None = None
         self._reader_thread: threading.Thread | None = None
@@ -308,6 +324,10 @@ class ClaudeCodeProvider(Provider):
     def recv(self) -> Iterator[dict[str, Any]]:
         if not self.alive or self.process is None or self._stdout_q is None:
             raise ProviderDeadError("subprocess not alive")
+        # Reset per-turn output-cap state at the start of every send->result
+        # cycle so the counter measures ONLY this turn's newly produced output.
+        self.turn_output_capped = False
+        self._turn_output_by_request = {}
         saw_result = False
         while True:
             item = self._next_line()
@@ -336,8 +356,48 @@ class ClaudeCodeProvider(Provider):
             if t == "result":
                 saw_result = True
                 break
+            # Output-cap brake: after yielding the event, tally this turn's
+            # newly produced output tokens and interrupt if it exceeds the cap.
+            # Done post-yield so the loop still gets the breaching event.
+            if t == "assistant" and self._turn_output_breached(ev):
+                self.turn_output_capped = True
+                log.warning(
+                    "turn output cap %d exceeded (%d) — interrupting turn",
+                    self.turn_output_cap,
+                    sum(self._turn_output_by_request.values()),
+                )
+                self.cancel()
+                return
+        # A cap-interrupted turn returns cleanly above; any other missing
+        # result is a genuine mid-turn death.
         if not saw_result:
             raise ProviderDeadError("subprocess died during recv")
+
+    def _turn_output_breached(self, ev: dict[str, Any]) -> bool:
+        """Accumulate this turn's OUTPUT tokens and report a cap breach.
+
+        Counts ONLY usage.output_tokens (never input/cache_* — those reflect
+        window size, easily 100k+, and would false-trigger every turn). A turn
+        spans several API requests (one per tool round trip); the stream also
+        repeats identical usage lines within a request. Dedup by top-level
+        requestId: keep the MAX output_tokens seen per requestId, then sum
+        across requests. Returns True once the sum exceeds turn_output_cap.
+        """
+        cap = self.turn_output_cap
+        if cap is None or cap <= 0:
+            return False
+        usage = (ev.get("message") or {}).get("usage") or {}
+        out = usage.get("output_tokens")
+        if not isinstance(out, int):
+            return False
+        # Events without a requestId (synthetic/test) each count once under a
+        # unique key so they still sum rather than clobber one another.
+        req_id = ev.get("requestId")
+        key = req_id if isinstance(req_id, str) and req_id else f"_noid_{id(ev)}"
+        prev = self._turn_output_by_request.get(key, 0)
+        if out > prev:
+            self._turn_output_by_request[key] = out
+        return sum(self._turn_output_by_request.values()) > cap
 
     def _kill_process_group(self) -> None:
         """SIGKILL the whole process group (spawned with start_new_session).

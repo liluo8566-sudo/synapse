@@ -546,6 +546,23 @@ class MainLoop:
                 self._handle_provider_dead(e, from_wxid, ctx_token)
                 return
 
+        # Turn output cap: the provider interrupted a runaway turn (brake, not
+        # a failure — no retry). Notify the user; the partial reply below still
+        # ships. Best-effort, never blocks the outbound path.
+        if (
+            from_wxid
+            and self._provider is not None
+            and getattr(self._provider, "turn_output_capped", False)
+        ):
+            try:
+                self._ilink.send_text(
+                    from_wxid,
+                    ctx_token,
+                    messages.t("provider.turn_capped", self.state.voice_style),
+                )
+            except Exception as e:
+                logger.warning("turn-cap notice send failed: %s", e)
+
         # B6: stamp the cross-channel last-active pointer once we have a sid.
         # Best-effort; never blocks the outbound path.
         sid = self.state.session_id

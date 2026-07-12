@@ -25,6 +25,9 @@ class TgConfig:
     # liveness check (poll process) and the hard idle kill (stall -> respawn).
     idle_soft_s: float = 60.0
     idle_hard_s: float = 300.0
+    # Per-turn OUTPUT token brake: interrupt a runaway turn instead of burning
+    # quota. 0 or negative disables.
+    turn_output_cap: int = 30000
     user_name: str = "user"
     assistant_name: str = "assistant"
 
@@ -83,6 +86,9 @@ def load_config(path: Path | None = None) -> TgConfig:
         hard = provider.get("idle_hard_s")
         if isinstance(hard, (int, float)) and not isinstance(hard, bool) and hard > 0:
             cfg.idle_hard_s = float(hard)
+        cap = provider.get("turn_output_cap")
+        if isinstance(cap, int) and not isinstance(cap, bool):
+            cfg.turn_output_cap = cap
 
     storage = data.get("storage") or {}
     if isinstance(storage, dict):
