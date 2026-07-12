@@ -61,7 +61,7 @@ _DEFAULT_IDLE_HARD_S = 300.0
 # config.toml; 0 or negative disables. Counts ONLY newly produced output
 # tokens for the current turn — never input/cache figures (those reflect
 # window size and would false-trigger every turn).
-_DEFAULT_TURN_OUTPUT_CAP = 30000
+_DEFAULT_TURN_OUTPUT_CAP = 20000
 
 # Sentinel objects for the stdout reader queue: EOF = clean stream end,
 # an Exception instance = a read error surfaced to recv().
@@ -175,8 +175,9 @@ class ClaudeCodeProvider(Provider):
         # Per-turn output cap state (reset at the start of every recv()).
         # turn_output_capped: sticky flag the loop layer reads after the turn
         # to send a "interrupted by the token cap" notice. NO retry on breach.
-        # _turn_output_by_request: max output_tokens seen per requestId within
-        # this turn; the current-turn total is the sum of these values.
+        # _turn_output_by_request: max output_tokens seen per request_id
+        # within this turn; the current-turn total is the sum of these
+        # values. Main-line only — subagent-attributed events are excluded.
         self.turn_output_capped: bool = False
         self._turn_output_by_request: dict[str, int] = {}
         # Populated in spawn(): stdout reader thread + its handoff queue.
@@ -359,6 +360,8 @@ class ClaudeCodeProvider(Provider):
             # Output-cap brake: after yielding the event, tally this turn's
             # newly produced output tokens and interrupt if it exceeds the cap.
             # Done post-yield so the loop still gets the breaching event.
+            # Subagent (Task-dispatched) events carry parent_tool_use_id and
+            # are excluded — see _turn_output_breached.
             if t == "assistant" and self._turn_output_breached(ev):
                 self.turn_output_capped = True
                 log.warning(
@@ -377,22 +380,33 @@ class ClaudeCodeProvider(Provider):
         """Accumulate this turn's OUTPUT tokens and report a cap breach.
 
         Counts ONLY usage.output_tokens (never input/cache_* — those reflect
-        window size, easily 100k+, and would false-trigger every turn). A turn
-        spans several API requests (one per tool round trip); the stream also
-        repeats identical usage lines within a request. Dedup by top-level
-        requestId: keep the MAX output_tokens seen per requestId, then sum
-        across requests. Returns True once the sum exceeds turn_output_cap.
+        window size, easily 100k+, and would false-trigger every turn).
+        Subagent output is excluded: a Task-dispatched subagent's assistant
+        events are interleaved into the SAME stream but carry a top-level
+        `parent_tool_use_id` (the dispatching tool_use id) instead of None —
+        verified empirically against a real stream-json transcript (2.1.197,
+        `claude --output-format stream-json` dispatching a Task). Counting
+        those would false-trigger the cap on ordinary agent-dispatch turns.
+
+        A turn spans several API requests (one per tool round trip); the
+        stream also repeats identical usage lines within a request. Dedup by
+        top-level `request_id` (snake_case — also verified on the same
+        transcript; NOT `requestId`): keep the MAX output_tokens seen per
+        request_id, then sum across requests. Returns True once the sum
+        exceeds turn_output_cap.
         """
         cap = self.turn_output_cap
         if cap is None or cap <= 0:
+            return False
+        if ev.get("parent_tool_use_id") is not None:
             return False
         usage = (ev.get("message") or {}).get("usage") or {}
         out = usage.get("output_tokens")
         if not isinstance(out, int):
             return False
-        # Events without a requestId (synthetic/test) each count once under a
+        # Events without a request_id (synthetic/test) each count once under a
         # unique key so they still sum rather than clobber one another.
-        req_id = ev.get("requestId")
+        req_id = ev.get("request_id")
         key = req_id if isinstance(req_id, str) and req_id else f"_noid_{id(ev)}"
         prev = self._turn_output_by_request.get(key, 0)
         if out > prev:

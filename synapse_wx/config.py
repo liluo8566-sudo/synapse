@@ -40,7 +40,7 @@ class Config:
     idle_hard_s: float = 300.0
     # Per-turn OUTPUT token brake: interrupt a runaway turn instead of burning
     # quota. 0 or negative disables.
-    turn_output_cap: int = 30000
+    turn_output_cap: int = 20000
     # B1 sessions table. Empty = bridge runs without marrow session persistence
     # (no row written, /resume falls back to jsonl grep). Format strings get
     # {sid}, {model}, {channel} substituted.
