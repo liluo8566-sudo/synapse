@@ -60,7 +60,7 @@ _TEMPLATES = {
     "exit_intent": (
         "[reading] {user_name}想退出《{book_title}》了 (发出于 {at}), 理由: {reasons}. "
         "本次读了 {elapsed_min} 分钟\n"
-        "(book_id={book_id}, session_id={session_id} — 用 book_retention 挽留她, 前端只等 45 秒;\n"
+        "(book_id={book_id}, session_id={session_id} — 用 book_retention 挽留她, 前端只等 90 秒;\n"
         " 这条如果已经过去几分钟以上, 她早走了, 不用再挽留)"
     ),
     "exit_result": (
