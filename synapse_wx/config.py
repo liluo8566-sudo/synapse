@@ -65,6 +65,7 @@ class Config:
     qidu_max_concurrent: int = 2
     qidu_extract_script: str = "~/workshop/qidu/local/extract_book.py"
     qidu_signal_poll_interval: float = 5.0
+    qidu_notebook_dir: str = ""
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -144,7 +145,7 @@ def load_config(path: Path | None = None) -> Config:
 
     qidu = data.get("qidu") or {}
     if isinstance(qidu, dict):
-        for fname in ("api_base", "token", "extract_script"):
+        for fname in ("api_base", "token", "extract_script", "notebook_dir"):
             val = qidu.get(fname)
             if isinstance(val, str):
                 setattr(cfg, f"qidu_{fname}", val)

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from synapse_core import heartbeat, last_active
+from synapse_core.qidu_notebook import NotebookSync
 from synapse_core.qidu_signal import QiduSignalPoller
 from synapse_core.text_filters import strip_html_comments
 from synapse_core.marrow_session import get_session_created_at, regen_suppress_path
@@ -207,6 +208,15 @@ class MainLoop:
                 alerts=alerts,
             )
             self._qidu_signal_interval = cfg.qidu_signal_poll_interval
+
+        self._qidu_notebook: NotebookSync | None = None
+        if cfg is not None and cfg.qidu_api_base and cfg.qidu_token and cfg.qidu_notebook_dir:
+            self._qidu_notebook = NotebookSync(
+                api_base=cfg.qidu_api_base,
+                token=cfg.qidu_token,
+                notebook_dir=cfg.qidu_notebook_dir,
+                alerts=alerts,
+            )
 
     # ── lifecycle ──────────────────────────────────────────────────
 
@@ -408,14 +418,17 @@ class MainLoop:
         logger.info("heartbeat injected (anomalies=%d)", len(data.get("anomalies", [])))
 
     def _check_qidu_signal(self) -> None:
-        """Poll qidu book-server for pending signals. Internally throttled to
-        signal_poll_interval (5s) since tick() itself runs at ~1s cadence."""
-        if self._qidu_signal is None:
-            return
+        """Poll qidu book-server for pending signals + notebook sync.
+        Internally throttled to signal_poll_interval (5s) since tick()
+        itself runs at ~1s cadence."""
         now = self._clock()
         if now - self._last_qidu_signal_poll < self._qidu_signal_interval:
             return
         self._last_qidu_signal_poll = now
+        if self._qidu_notebook is not None:
+            self._qidu_notebook.tick()
+        if self._qidu_signal is None:
+            return
         if self._last_from_wxid is None:
             return
         if not self._qidu_signal.should_poll():

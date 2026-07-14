@@ -56,6 +56,10 @@ max_concurrent = 2
 # signals, injects them into whichever bridge 霜霜 is active on.
 signal_poll_interval = 5.0
 extract_script = "~/workshop/qidu/local/extract_book.py"
+# Local Obsidian-style vault sync — pulls the markdown export for dirty
+# books and writes one file per book under this directory (atomic
+# overwrite, ~60s after a change). Empty = notebook sync disabled.
+notebook_dir = ""
 
 [alerts]
 # Command to pipe alerts into marrow (optional)

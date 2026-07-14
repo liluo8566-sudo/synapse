@@ -22,6 +22,7 @@ from telegram import Bot, Update
 from telegram.ext import ContextTypes
 
 from synapse_core import bridge_state_store, heartbeat, last_active
+from synapse_core.qidu_notebook import NotebookSync
 from synapse_core.qidu_signal import QiduSignalPoller
 from synapse_core.marrow_session import get_session_created_at, get_session_effort, regen_suppress_path
 from synapse_core.commands import messages
@@ -130,6 +131,14 @@ class TgLoop:
                 token=cfg.qidu_token,
                 channel="tg",
                 user_name=cfg.user_name,
+                alerts=alerts,
+            )
+        self._qidu_notebook: NotebookSync | None = None
+        if cfg.qidu_api_base and cfg.qidu_token and cfg.qidu_notebook_dir:
+            self._qidu_notebook = NotebookSync(
+                api_base=cfg.qidu_api_base,
+                token=cfg.qidu_token,
+                notebook_dir=cfg.qidu_notebook_dir,
                 alerts=alerts,
             )
         self._provider: ClaudeCodeProvider | None = None
@@ -687,6 +696,8 @@ class TgLoop:
     async def check_qidu_signal(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self._bot is None:
             self._bot = context.bot
+        if self._qidu_notebook is not None:
+            await asyncio.to_thread(self._qidu_notebook.tick)
         if self._qidu_signal is None:
             return
         if self._pending_chat_id is None:

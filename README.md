@@ -32,6 +32,9 @@ Requires [marrow](https://github.com/Jaynechu/marrow) installed separately.
 - `[persona]` — user/assistant display names
 - `[cwd_presets]` — numbered shortcuts for `/cwd N`
 - `[marrow]` — db path + sessionend command template
+- `[qidu] notebook_dir` — optional: syncs a qidu book-server's markdown
+  export (highlights/annotations) into a local vault directory, one file
+  per book. Empty = disabled.
 
 ## Commands
 
