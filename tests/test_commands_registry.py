@@ -195,7 +195,7 @@ def test_natural_alias_case_insensitive() -> None:
     reg, hooks, _ = _make(s)
     verdict, _ = reg.dispatch("SONNET")
     assert verdict == "handled"
-    assert hooks.swap_calls == [("claude-sonnet-4-6", None)]
+    assert hooks.swap_calls == [("sonnet", None)]
 
 
 # ── /clear ────────────────────────────────────────────────────

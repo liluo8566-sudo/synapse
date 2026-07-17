@@ -77,7 +77,7 @@ def test_resume_empty_lists_picker() -> None:
     rows = [
         {"sid": "abcdef12-aaaa", "model": "claude-opus-4-6[1m]", "channel": "wx",
          "last_active": "2026-06-02T20:00:00Z", "title": "lumi-wx"},
-        {"sid": "12345678-bbbb", "model": "claude-sonnet-4-6", "channel": "cli",
+        {"sid": "12345678-bbbb", "model": "sonnet", "channel": "cli",
          "last_active": "2026-06-02T19:00:00Z", "title": ""},
     ]
     reg, _ = _make(state, list_recent_sessions=lambda: rows)
@@ -90,7 +90,7 @@ def test_resume_empty_lists_picker() -> None:
     # assert the structural prefix and let the clock segment be free-form.
     assert "1. [wx] lumi-wx (abcdef12) Opus 4.6 [1M] " in body
     # Empty title falls back to a placeholder so the row still has shape.
-    assert "2. [cli] (untitled) (12345678) Sonnet 4.6 " in body
+    assert "2. [cli] (untitled) (12345678) Sonnet " in body
     assert "Reply with the number" in body
 
 
