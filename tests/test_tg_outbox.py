@@ -284,5 +284,5 @@ def test_long_body_split_into_bubbles(tmp_path):
     assert len(bot.sent) >= 2
     assert _row(db, rid)["status"] == "sent"
     # Prefix lands on the first bubble only.
-    assert bot.sent[0]["text"].startswith("\U0001f4ee ")
-    assert not bot.sent[1]["text"].startswith("\U0001f4ee ")
+    assert bot.sent[0]["text"].startswith("\U0001f4ee")
+    assert "\U0001f4ee" not in bot.sent[1]["text"]
