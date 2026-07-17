@@ -93,7 +93,10 @@ def kick(kick_cmd, kind: str, *, note_id=None, minutes=None, text=None,
 def claim_reply(db_path, channel: str) -> list[int]:
     """Inbound from her on `channel`: atomically claim ALL armed watches whose
     note went to that channel (single UPDATE armed->fired). Returns the note ids
-    claimed (empty when none / no db). The single UPDATE is the race winner
+    claimed (empty when none / no db). Any armed row qualifies — reply-watch
+    (watch_reply=1) or timeout-only (watch_timeout_min set, watch_reply=0): a
+    declared watch of either shape means she replying should kick immediately
+    (watch = sender-declared urgency). The single UPDATE is the race winner
     against a concurrent timeout claim."""
     conn = _connect(db_path)
     if conn is None:
@@ -102,14 +105,14 @@ def claim_reply(db_path, channel: str) -> list[int]:
         with conn:
             rows = conn.execute(
                 "SELECT id FROM outbox WHERE target=? AND status='sent'"
-                " AND watch_reply=1 AND watch_state='armed'",
+                " AND watch_state='armed'",
                 (channel,),
             ).fetchall()
             if not rows:
                 return []
             conn.execute(
                 "UPDATE outbox SET watch_state='fired' WHERE target=?"
-                " AND status='sent' AND watch_reply=1 AND watch_state='armed'",
+                " AND status='sent' AND watch_state='armed'",
                 (channel,),
             )
         return [r["id"] for r in rows]

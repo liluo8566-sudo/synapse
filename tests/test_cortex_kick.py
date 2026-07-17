@@ -99,9 +99,9 @@ def test_reply_claims_all_armed_on_channel(tmp_path):
 
 def test_reply_ignores_other_channel_and_unarmed(tmp_path):
     db = _db(tmp_path)
-    _sent_watch(db, "wx")                       # other channel
-    _sent_watch(db, "tg", watch_reply=0)        # not a watch
-    _sent_watch(db, "tg", state="fired")        # already fired
+    _sent_watch(db, "wx")                                    # other channel
+    _sent_watch(db, "tg", watch_reply=0, state=None)         # not a watch at all
+    _sent_watch(db, "tg", state="fired")                     # already fired
     assert cortex_kick.claim_reply(db, "tg") == []
 
 
@@ -273,12 +273,14 @@ def test_timeout_only_row_fires(tmp_path):
     assert _state(db, rid) == "fired"
 
 
-def test_timeout_only_row_never_claimed_by_reply(tmp_path):
-    # A timeout-only armed row must stay excluded from claim_reply (which
-    # requires watch_reply=1) — no regression from the broader arming.
+def test_timeout_only_row_claimed_by_reply(tmp_path):
+    # CHANGE 1: any armed watch buys reply-immediacy — a timeout-only row
+    # (watch_reply=0, watch_timeout_min set) must fire on her reply too, not
+    # wait for the timeout poll.
     db = _db(tmp_path)
-    _sent_watch(db, "tg", watch_reply=0, timeout_min=10)
-    assert cortex_kick.claim_reply(db, "tg") == []
+    rid = _sent_watch(db, "tg", watch_reply=0, timeout_min=10)
+    assert cortex_kick.claim_reply(db, "tg") == [rid]
+    assert _state(db, rid) == "fired"
 
 
 # ── reply-vs-timeout single winner ────────────────────────────────────────
@@ -289,6 +291,30 @@ def test_reply_then_timeout_single_winner(tmp_path):
     rid = _sent_watch(db, "tg", timeout_min=10, sent_at=past)
     assert cortex_kick.claim_reply(db, "tg") == [rid]   # reply wins first
     assert cortex_kick.claim_timeouts(db, "tg") == []   # timeout finds nothing
+    assert _state(db, rid) == "fired"
+
+
+def test_timeout_only_reply_before_deadline_single_kick(tmp_path):
+    # CHANGE 1: timeout-only watch, she replies before the deadline -> reply
+    # claim wins (fired), the later timeout poll must find nothing (no second
+    # kick, no re-fire of an already-terminal row).
+    db = _db(tmp_path)
+    recent = _iso(datetime.now(timezone.utc) - timedelta(minutes=2))
+    rid = _sent_watch(db, "tg", watch_reply=0, timeout_min=10, sent_at=recent)
+    assert cortex_kick.claim_reply(db, "tg") == [rid]
+    assert _state(db, rid) == "fired"
+    assert cortex_kick.claim_timeouts(db, "tg") == []
+    assert _state(db, rid) == "fired"          # unchanged, not re-polled
+
+
+def test_both_set_exactly_one_kick_reply_first(tmp_path):
+    # Both watch_reply=1 and watch_timeout_min set -> reply claims first,
+    # timeout poll finds nothing -> exactly one kick's worth of claim.
+    db = _db(tmp_path)
+    past = _iso(datetime.now(timezone.utc) - timedelta(minutes=30))
+    rid = _sent_watch(db, "tg", watch_reply=1, timeout_min=10, sent_at=past)
+    assert cortex_kick.claim_reply(db, "tg") == [rid]
+    assert cortex_kick.claim_timeouts(db, "tg") == []
     assert _state(db, rid) == "fired"
 
 
