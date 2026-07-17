@@ -262,6 +262,25 @@ def test_timeout_needs_timeout_min(tmp_path):
     assert cortex_kick.claim_timeouts(db, "tg") == []
 
 
+def test_timeout_only_row_fires(tmp_path):
+    # FIX 3: watch_reply=0 + watch_timeout_min set (marrow outbox.send now arms
+    # this shape) must still be claimable by the timeout poll.
+    db = _db(tmp_path)
+    past = _iso(datetime.now(timezone.utc) - timedelta(minutes=30))
+    rid = _sent_watch(db, "tg", watch_reply=0, timeout_min=10, sent_at=past)
+    won = cortex_kick.claim_timeouts(db, "tg")
+    assert [w["id"] for w in won] == [rid]
+    assert _state(db, rid) == "fired"
+
+
+def test_timeout_only_row_never_claimed_by_reply(tmp_path):
+    # A timeout-only armed row must stay excluded from claim_reply (which
+    # requires watch_reply=1) — no regression from the broader arming.
+    db = _db(tmp_path)
+    _sent_watch(db, "tg", watch_reply=0, timeout_min=10)
+    assert cortex_kick.claim_reply(db, "tg") == []
+
+
 # ── reply-vs-timeout single winner ────────────────────────────────────────
 
 def test_reply_then_timeout_single_winner(tmp_path):
