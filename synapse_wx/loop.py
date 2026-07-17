@@ -408,14 +408,17 @@ class MainLoop:
         """Her message landed on wx -> claim any armed watches on wx (one kick),
         and morning flag-pull (night flag + past morning_start -> kick). Never
         raises; no-ops without kick_cmd. Reply path claims instantly. `text` =
-        her reply body, attached to the reply kick."""
+        her reply body, attached to the reply kick; a media-only reply (no
+        extractable text) substitutes the config placeholder so the reason line
+        never renders an empty quote."""
         db = self._outbox_db()
         kc = self._cfg.outbox_kick_cmd
+        kick_text = text.strip() if text else self._cfg.outbox_kick_media_placeholder
         try:
             ids = cortex_kick.claim_reply(db, "wx") if db else []
             if ids:
                 note_id = ids[0] if len(ids) == 1 else ",".join(str(i) for i in ids)
-                cortex_kick.kick(kc, "reply", note_id=note_id, text=text,
+                cortex_kick.kick(kc, "reply", note_id=note_id, text=kick_text,
                                  text_chars=self._cfg.outbox_kick_text_chars)
             if cortex_kick.night_mode(self._cfg.cortex_wake_state_file) and \
                     cortex_kick.past_morning_start(
