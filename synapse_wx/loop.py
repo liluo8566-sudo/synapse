@@ -415,6 +415,10 @@ class MainLoop:
         kc = self._cfg.outbox_kick_cmd
         kick_text = text.strip() if text else self._cfg.outbox_kick_media_placeholder
         try:
+            if db:
+                cortex_kick.stamp_receipts(
+                    db, "wx", kick_text,
+                    text_chars=self._cfg.outbox_receipt_text_chars)
             ids = cortex_kick.claim_reply(db, "wx") if db else []
             if ids:
                 note_id = ids[0] if len(ids) == 1 else ",".join(str(i) for i in ids)

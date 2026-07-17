@@ -79,6 +79,7 @@ class Config:
     # Empty = watch/kick off. Morning flag-pull reads night flag + morning_start.
     outbox_kick_cmd: list | str | None = None
     outbox_kick_text_chars: int = 200
+    outbox_receipt_text_chars: int = 120
     outbox_kick_media_placeholder: str = "[media]"
     cortex_wake_state_file: str = ""
     night_morning_start: str = "06:00"
@@ -155,6 +156,9 @@ def load_config(path: Path | None = None) -> Config:
         ktc = outbox.get("kick_text_chars")
         if isinstance(ktc, int) and not isinstance(ktc, bool) and ktc > 0:
             cfg.outbox_kick_text_chars = ktc
+        rtc = outbox.get("receipt_text_chars")
+        if isinstance(rtc, int) and not isinstance(rtc, bool) and rtc > 0:
+            cfg.outbox_receipt_text_chars = rtc
         kmp = outbox.get("kick_media_placeholder")
         if isinstance(kmp, str) and kmp.strip():
             cfg.outbox_kick_media_placeholder = kmp

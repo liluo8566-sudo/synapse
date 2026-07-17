@@ -23,7 +23,8 @@ CREATE TABLE outbox (
   status TEXT NOT NULL DEFAULT 'pending', sent_at TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0,
   watch_reply INTEGER NOT NULL DEFAULT 0,
-  watch_timeout_min INTEGER, watch_state TEXT
+  watch_timeout_min INTEGER, watch_state TEXT,
+  replied_at TEXT, reply_text TEXT, receipt_seen INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +110,69 @@ def test_reply_second_call_no_double(tmp_path):
     _sent_watch(db, "tg")
     assert cortex_kick.claim_reply(db, "tg")     # first wins
     assert cortex_kick.claim_reply(db, "tg") == []  # nothing left
+
+
+# ── receipt stamp (P12) ───────────────────────────────────────────────────
+
+def _sent_plain(db, target="tg", *, status="sent", replied_at=None) -> int:
+    conn = sqlite3.connect(db)
+    cur = conn.execute(
+        "INSERT INTO outbox (target, body, status, replied_at)"
+        " VALUES (?, 'hi', ?, ?)",
+        (target, status, replied_at))
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def _receipt(db, rid):
+    conn = sqlite3.connect(db)
+    r = conn.execute(
+        "SELECT replied_at, reply_text FROM outbox WHERE id=?", (rid,)).fetchone()
+    conn.close()
+    return r
+
+
+def test_stamp_receipts_stamps_all_unreplied_sent_on_channel(tmp_path):
+    db = _db(tmp_path)
+    a = _sent_plain(db, "tg")                 # non-watch sent
+    b = _sent_watch(db, "tg")                 # watch sent
+    n = cortex_kick.stamp_receipts(db, "tg", "hey love")
+    assert n == 2
+    for rid in (a, b):
+        rep = _receipt(db, rid)
+        assert rep[0] and rep[1] == "hey love"
+
+
+def test_stamp_receipts_channel_and_status_scoped(tmp_path):
+    db = _db(tmp_path)
+    other = _sent_plain(db, "wx")             # other channel
+    pending = _sent_plain(db, "tg", status="pending")  # not yet sent
+    assert cortex_kick.stamp_receipts(db, "tg", "hi") == 0
+    assert _receipt(db, other)[0] is None
+    assert _receipt(db, pending)[0] is None
+
+
+def test_stamp_receipts_only_unreplied(tmp_path):
+    db = _db(tmp_path)
+    already = _sent_plain(db, "tg", replied_at="2026-07-17T00:00:00Z")
+    fresh = _sent_plain(db, "tg")
+    assert cortex_kick.stamp_receipts(db, "tg", "new text") == 1
+    assert _receipt(db, already)[1] is None   # earlier receipt untouched
+    assert _receipt(db, fresh)[1] == "new text"
+
+
+def test_stamp_receipts_truncates(tmp_path):
+    db = _db(tmp_path)
+    rid = _sent_plain(db, "tg")
+    cortex_kick.stamp_receipts(db, "tg", "x" * 500, text_chars=120)
+    assert _receipt(db, rid)[1] == "x" * 120
+
+
+def test_stamp_receipts_never_raises_on_missing_db(tmp_path):
+    assert cortex_kick.stamp_receipts(str(tmp_path / "nope.db"), "tg", "hi") == 0
+    assert cortex_kick.stamp_receipts(None, "tg", "hi") == 0
 
 
 # ── timeout claim ─────────────────────────────────────────────────────────

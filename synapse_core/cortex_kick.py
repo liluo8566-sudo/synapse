@@ -120,6 +120,34 @@ def claim_reply(db_path, channel: str) -> list[int]:
         conn.close()
 
 
+def stamp_receipts(db_path, channel: str, text: str, text_chars=None) -> int:
+    """Inbound from her on `channel`: stamp a reply receipt (replied_at UTC ISO +
+    truncated reply_text) on EVERY sent note delivered to that channel still
+    awaiting one (replied_at IS NULL), watch or not. Single UPDATE. Returns the
+    row count stamped (0 on none / no db). Never raises — the durable record is
+    best-effort, same defensive style as claim_reply."""
+    conn = _connect(db_path)
+    if conn is None:
+        return 0
+    body = str(text or "")
+    if text_chars and text_chars > 0:
+        body = body[:int(text_chars)]
+    try:
+        with conn:
+            cur = conn.execute(
+                "UPDATE outbox SET replied_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),"
+                " reply_text=? WHERE target=? AND status='sent'"
+                " AND replied_at IS NULL",
+                (body, channel),
+            )
+        return cur.rowcount or 0
+    except sqlite3.Error as e:
+        logger.warning("cortex_kick stamp_receipts failed: %s", e)
+        return 0
+    finally:
+        conn.close()
+
+
 def _no_user_reply_since(conn: sqlite3.Connection, channel: str, sent_at: str) -> bool:
     """True when the marrow events table shows NO real user turn on `channel`
     after `sent_at` (per-turn stop-hook archiving = the cross-process truth,

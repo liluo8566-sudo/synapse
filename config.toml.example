@@ -20,6 +20,9 @@ retry_max = 3
 # Her reply text is truncated to this many chars before riding the reply kick
 # into cortex's wakeup note (so cortex sees WHAT she said, not just that she did).
 kick_text_chars = 200
+# Her reply text is truncated to this many chars before it is stamped as the
+# durable receipt on every sent note (surfaces in cortex's next note, watch or not).
+receipt_text_chars = 120
 # Placeholder text for a media-only reply (sticker/photo, no extractable text) —
 # rides the reply kick instead of an empty string, e.g. Msg #7 replied: "[media]".
 kick_media_placeholder = "[media]"

@@ -26,7 +26,8 @@ CREATE TABLE outbox (
   from_sid TEXT, from_channel TEXT, target TEXT NOT NULL, body TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending', sent_at TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0, watch_reply INTEGER NOT NULL DEFAULT 0,
-  watch_timeout_min INTEGER, watch_state TEXT
+  watch_timeout_min INTEGER, watch_state TEXT,
+  replied_at TEXT, reply_text TEXT, receipt_seen INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT DEFAULT 's',
   timestamp TEXT NOT NULL, role TEXT NOT NULL, content TEXT DEFAULT '', channel TEXT);
@@ -132,6 +133,33 @@ def test_media_only_reply_kick_carries_placeholder(tmp_path, kicks):
     reply = [k for k in kicks if k["kind"] == "reply"]
     assert reply
     assert reply[0]["text"] == "[media]"       # config default placeholder
+
+
+def _sent_plain(db, target="wx"):
+    conn = sqlite3.connect(db)
+    cur = conn.execute(
+        "INSERT INTO outbox (target, body, status) VALUES (?, 'x', 'sent')",
+        (target,))
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def test_inbound_stamps_receipt_even_without_watch(tmp_path, kicks):
+    # P12: a non-watch sent note gets its receipt stamped on her inbound (no kick,
+    # but the durable record lands).
+    db = _db(tmp_path)
+    rid = _sent_plain(db)
+    ilink = FakeILink(msgs=[{"from_wxid": "wxid_her", "text": "hey"}])
+    loop, _ = _loop(tmp_path, db, ilink)
+    loop.tick()
+    conn = sqlite3.connect(db)
+    row = conn.execute(
+        "SELECT replied_at, reply_text FROM outbox WHERE id=?", (rid,)).fetchone()
+    conn.close()
+    assert row[0] and row[1] == "hey"
+    assert [k["kind"] for k in kicks] == []   # no watch -> no kick
 
 
 def test_tick_other_sender_no_kick(tmp_path, kicks):
