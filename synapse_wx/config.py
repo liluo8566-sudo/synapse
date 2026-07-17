@@ -80,6 +80,9 @@ class Config:
     outbox_kick_text_chars: int = 200
     outbox_receipt_text_chars: int = 120
     outbox_kick_media_placeholder: str = "[media]"
+    # Marks a delivered note as bridge-sent (vs the resident session's own
+    # chat), so her phone can tell them apart at a glance. Empty disables.
+    outbox_note_prefix: str = "\U0001f4ee "
     cortex_wake_state_file: str = ""
     night_morning_start: str = "06:00"
     timezone: str = "Australia/Melbourne"
@@ -156,6 +159,8 @@ def load_config(path: Path | None = None) -> Config:
         kmp = outbox.get("kick_media_placeholder")
         if isinstance(kmp, str) and kmp.strip():
             cfg.outbox_kick_media_placeholder = kmp
+        if "note_prefix" in outbox and isinstance(outbox["note_prefix"], str):
+            cfg.outbox_note_prefix = outbox["note_prefix"]
     cortex = data.get("cortex") or {}
     if isinstance(cortex, dict):
         ws = cortex.get("wake_state_file")

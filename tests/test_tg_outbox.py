@@ -134,8 +134,8 @@ def test_pending_delivered_and_marked_sent(tmp_path):
 
     asyncio.run(loop.outbox_poll(_Ctx(bot)))
 
-    assert [m["text"] for m in bot.sent] == ["hey from another session"]
-    # No prefix — it IS him speaking.
+    # Default note_prefix marks it as bridge-sent, distinct from her own chat.
+    assert [m["text"] for m in bot.sent] == ["\U0001f4ee hey from another session"]
     assert bot.sent[0]["chat_id"] == 999
     r = _row(db, rid)
     assert r["status"] == "sent"
@@ -242,6 +242,34 @@ def test_claim_is_atomic_single_winner(tmp_path):
     assert second == []  # nothing left pending
 
 
+# --- note_prefix ------------------------------------------------------------
+
+def test_note_prefix_config_default_and_override(tmp_path):
+    assert TgConfig().outbox_note_prefix == "\U0001f4ee "
+    p = tmp_path / "config.toml"
+    p.write_text('[tg]\nchat_id = 42\n[outbox]\nnote_prefix = ">> "\n')
+    cfg = load_config(p)
+    assert cfg.outbox_note_prefix == ">> "
+
+
+def test_empty_note_prefix_disables(tmp_path):
+    db = _db(tmp_path)
+    rid = _insert(db, "plain note")
+    cfg = TgConfig(
+        data_dir=tmp_path / "tg-data",
+        marrow_db=db,
+        chat_id=999,
+        outbox_note_prefix="",
+    )
+    loop = TgLoop(cfg)
+    bot = FakeBot()
+
+    asyncio.run(loop.outbox_poll(_Ctx(bot)))
+
+    assert [m["text"] for m in bot.sent] == ["plain note"]
+    assert _row(db, rid)["status"] == "sent"
+
+
 # --- multi-bubble body ----------------------------------------------------
 
 def test_long_body_split_into_bubbles(tmp_path):
@@ -255,3 +283,6 @@ def test_long_body_split_into_bubbles(tmp_path):
 
     assert len(bot.sent) >= 2
     assert _row(db, rid)["status"] == "sent"
+    # Prefix lands on the first bubble only.
+    assert bot.sent[0]["text"].startswith("\U0001f4ee ")
+    assert not bot.sent[1]["text"].startswith("\U0001f4ee ")

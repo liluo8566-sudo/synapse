@@ -468,8 +468,10 @@ class MainLoop:
         except Exception as e:
             logger.warning("watch_timeout kick failed: %s", e)
         rows = outbox.claim_pending(db)
+        prefix = self._cfg.outbox_note_prefix
         for row in rows:
-            self._deliver_outbox_row(row["id"], row["body"] or "")
+            body = prefix + (row["body"] or "") if prefix else (row["body"] or "")
+            self._deliver_outbox_row(row["id"], body)
 
     def _deliver_outbox_row(self, row_id: int, body: str) -> None:
         """Deliver one claimed row. send_text chunks + retries internally, so

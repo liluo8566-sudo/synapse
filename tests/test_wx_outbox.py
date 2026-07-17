@@ -179,8 +179,8 @@ def test_pending_delivered_and_marked_sent(tmp_path):
 
     loop._outbox_scan()
 
-    # No prefix — it IS him speaking; empty context_token; to = target_wxid.
-    assert ilink.sent == [("wxid_her", "", "hey from another session")]
+    # Default note_prefix marks it as bridge-sent; empty context_token; to = target_wxid.
+    assert ilink.sent == [("wxid_her", "", "\U0001f4ee hey from another session")]
     r = _row(db, rid)
     assert r["status"] == "sent"
     assert r["sent_at"] is not None
@@ -208,7 +208,7 @@ def test_delivered_via_tick_after_poll_ok(tmp_path):
 
     loop.tick()
 
-    assert ilink.sent == [("wxid_her", "", "note via tick")]
+    assert ilink.sent == [("wxid_her", "", "\U0001f4ee note via tick")]
     assert _row(db, rid)["status"] == "sent"
 
 
@@ -318,6 +318,55 @@ def test_orphan_sweep_only_touches_wx(tmp_path):
 
     assert _row(db, wx_id)["status"] == "failed"
     assert _row(db, tg_id)["status"] == "claimed"  # untouched
+
+
+# --- note_prefix ------------------------------------------------------------
+
+def test_note_prefix_config_default_and_override(tmp_path):
+    assert Config().outbox_note_prefix == "\U0001f4ee "
+    p = tmp_path / "config.toml"
+    p.write_text('[user]\ntarget_wxid = "wxid_x"\n[outbox]\nnote_prefix = ">> "\n')
+    cfg = load_config(p)
+    assert cfg.outbox_note_prefix == ">> "
+
+
+def test_empty_note_prefix_disables(tmp_path):
+    db = _db(tmp_path)
+    rid = _insert(db, "plain note")
+    ilink = FakeILink()
+    loop, _ = _loop(tmp_path, db, ilink)
+    loop._cfg.outbox_note_prefix = ""
+
+    loop._outbox_scan()
+
+    assert ilink.sent == [("wxid_her", "", "plain note")]
+    assert _row(db, rid)["status"] == "sent"
+
+
+class ChunkingILink(FakeILink):
+    """Mirrors ilink.client.send_text: splits at max_len like the real client,
+    recording each chunk as a separate send call."""
+
+    def send_text(self, to, ctx, text, max_len=20, **_kw) -> bool:
+        while text:
+            chunk, text = text[:max_len], text[max_len:]
+            self.sent.append((to, ctx, chunk))
+        return True
+
+
+def test_note_prefix_only_on_first_chunk(tmp_path):
+    db = _db(tmp_path)
+    body = "x" * 50
+    rid = _insert(db, body)
+    ilink = ChunkingILink()
+    loop, _ = _loop(tmp_path, db, ilink)
+
+    loop._outbox_scan()
+
+    assert len(ilink.sent) >= 2
+    assert ilink.sent[0][2].startswith("\U0001f4ee ")
+    assert not ilink.sent[1][2].startswith("\U0001f4ee ")
+    assert _row(db, rid)["status"] == "sent"
 
 
 # --- atomic claim: concurrent poll each row claimed once ------------------
