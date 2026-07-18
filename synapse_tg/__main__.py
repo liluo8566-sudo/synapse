@@ -6,7 +6,6 @@ import logging
 import os
 import signal
 import time
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -69,7 +68,6 @@ def main() -> int:
     (data_dir / "alerts").mkdir(parents=True, exist_ok=True)
     session_state_path = data_dir / "sessions.json"
     audit_log_path = data_dir / "session_audit.log"
-    sessionend_err_log = data_dir / "sessionend_err.log"
     marrow_db = str(Path(cfg.marrow_db).expanduser()) if cfg.marrow_db else ""
     cc_projects_dir = str(Path(cfg.cc_projects_dir).expanduser())
 
@@ -102,10 +100,8 @@ def main() -> int:
         if lp is not None:
             lp._close_provider()
 
-    mid_cmd = marrow_session.mid_scan_command(cfg.sessionend_command, CHANNEL)
     idle_loop = IdleFireLoop(
         sessions=sessions,
-        mid_sessionend_command=mid_cmd,
         marker_dir=marker_dir,
         audit_log=audit_log_path,
         channel=CHANNEL,
@@ -125,20 +121,6 @@ def main() -> int:
     state = loop._state
 
     # --- command closures ---
-    def _fire_sessionend(sid: str) -> None:
-        if not sid or not cfg.sessionend_command:
-            return
-        argv = shlex.split(cfg.sessionend_command.replace("{sid}", sid))
-        try:
-            subprocess.Popen(
-                argv,
-                stdout=open(sessionend_err_log, "a"),  # noqa: SIM115
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        except OSError as e:
-            logger.warning("fire_sessionend failed: %s", e)
-
     def _audit_writer(kind: str, sid: str, status: str) -> None:
         if not marrow_db:
             return
@@ -187,7 +169,6 @@ def main() -> int:
         swap_provider=loop._swap_provider,
         close_provider=loop._close_provider,
         forget_session=loop._forget_session,
-        fire_sessionend=_fire_sessionend,
         get_status=loop.get_status,
         commands_doc_path=Path(__file__).resolve().parents[1] / "COMMANDS.md",
         resolve_resume_model=lambda sid: marrow_session.resolve_resume_model(
@@ -274,6 +255,16 @@ def main() -> int:
     app.job_queue.run_repeating(loop.check_heartbeat, interval=15, first=10)
     app.job_queue.run_repeating(loop.check_qidu_signal, interval=cfg.qidu_signal_poll_interval, first=5)
     app.job_queue.run_repeating(loop.check_autonomous_turn, interval=3, first=5)
+
+    if cfg.chat_id is None:
+        logger.warning("outbox: [tg].chat_id not set — outbound note delivery disabled")
+    else:
+        loop.sweep_outbox_orphans()
+        app.job_queue.run_repeating(
+            loop.outbox_poll,
+            interval=cfg.outbox_poll_interval_s,
+            first=cfg.outbox_poll_interval_s,
+        )
 
     async def _error_handler(update, context):
         if isinstance(context.error, (NetworkError, TimedOut)):

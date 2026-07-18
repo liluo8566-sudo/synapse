@@ -6,6 +6,27 @@
 # Get from @BotFather on Telegram
 token = ""
 
+[tg]
+# Authorized recipient chat id for outbound notes (cross-channel drop).
+# REQUIRED for the outbox feature — without it, note delivery is disabled.
+# chat_id = 123456789
+
+[outbox]
+# Bridge scan cadence for pending outbox notes (seconds).
+poll_interval_s = 5
+# Inline send-call retries per bubble before the row is marked failed.
+# NOT whole-row redelivery: a crash-orphan claimed row is failed, never resent.
+retry_max = 3
+# Her reply text is truncated to this many chars before riding the reply kick
+# into cortex's wakeup note (so cortex sees WHAT she said, not just that she did).
+kick_text_chars = 200
+# Her reply text is truncated to this many chars before it is stamped as the
+# durable receipt on every sent note (surfaces in cortex's next note, watch or not).
+receipt_text_chars = 120
+# Placeholder text for a media-only reply (sticker/photo, no extractable text) —
+# rides the reply kick instead of an empty string, e.g. Msg #7 replied: "[media]".
+kick_media_placeholder = "[media]"
+
 # ── WeChat ────────────────────────────────────────────
 [user]
 # Your wxid — run `python -m synapse_wx.ilink` to find it after QR login
@@ -13,6 +34,21 @@ target_wxid = ""
 
 [loop]
 poll_interval_sec = 1.0
+# Spacing between outbound reply bubbles (seconds).
+bubble_gap_sec = 0.8
+# Outbound-edge bubble cap (wx): adjacent text bubbles are merged until a
+# turn fits within this many. Main defense vs the iLink send count quota.
+bubble_cap = 10
+
+[send]
+# (wx) On a business rejection (ret!=0 → iLink send count quota exhausted), wait
+# this long (seconds) for the quota window to roll over, then retry once.
+quota_wait_sec = 65.0
+# (tg) Max attempts per outbound bubble on a 429 RetryAfter before giving up.
+send_retry_max = 2
+# (tg) If Telegram's RetryAfter exceeds this many seconds, skip the wait and
+# treat the send as failed instead of stalling the bridge.
+retry_after_cap_sec = 60.0
 
 # ── Shared ────────────────────────────────────────────
 [provider]
@@ -36,9 +72,6 @@ assistant_name = ""
 [marrow]
 # Only needed if marrow_bridge = true
 db = "~/.config/marrow/marrow.db"
-sessionend_command = ""
-# Template: "{venv}/python -m marrow.sessionend_async --sid {sid}"
-# {venv} = path to your marrow .venv/bin, {sid} = replaced at runtime
 
 [cwd_presets]
 # Named shortcuts for /cwd N command. Map number to absolute path.

@@ -18,12 +18,32 @@ DEFAULT_CC_CWD = str(Path.home())
 
 @dataclass
 class Config:
-    sessionend_command: str = "python -m marrow.sessionend_async --sid {sid}"
     poll_interval_sec: float = 1.0
+    # Spacing between outbound reply bubbles. Wider gap avoids tripping the
+    # iLink rate limit (ret=-2) on multi-bubble turns.
+    bubble_gap_sec: float = 0.8
+    # Outbound edge bubble cap: adjacent text bubbles are merged before the
+    # send loop until the turn fits within this many bubbles. Main defense
+    # against the iLink ~10-per-minute count quota (ret=-2).
+    bubble_cap: int = 10
+    # On a business rejection (ret!=0), wait this long for the quota window to
+    # roll over, then retry the chunk once. Replaces the old exponential
+    # backoff (useless against a minute-scale count quota).
+    quota_wait_sec: float = 65.0
     target_wxid: str = ""
     marrow_repo_cmd: str = ""
     cc_cwd: str = ""  # cwd cc subprocess spawns in; empty = $HOME
+<<<<<<< HEAD
     user_name: str = ""  # [persona] display name for injected signal text
+=======
+    # Provider liveness: seconds of continuous stream silence before the soft
+    # liveness check (poll process) and the hard idle kill (stall -> respawn).
+    idle_soft_s: float = 60.0
+    idle_hard_s: float = 300.0
+    # Per-turn OUTPUT token brake: interrupt a runaway turn instead of burning
+    # quota. 0 or negative disables.
+    turn_output_cap: int = 20000
+>>>>>>> upstream/main
     # B1 sessions table. Empty = bridge runs without marrow session persistence
     # (no row written, /resume falls back to jsonl grep). Format strings get
     # {sid}, {model}, {channel} substituted.
@@ -51,6 +71,25 @@ class Config:
     # PLAN 2c typing-event hunt: dump raw getupdates payloads until this local
     # date (inclusive, "YYYY-MM-DD"). Empty = off. Auto-expires after the date.
     raw_poll_log_until: str = ""
+
+    # Outbox (cross-channel note delivery). Feature no-ops without target_wxid.
+    # poll folds into MainLoop.tick; retry_max counts send_text CALLS (send_text
+    # chunks + retries internally — no stacked retry on top).
+    outbox_poll_interval_s: float = 5.0
+    outbox_retry_max: int = 3
+
+    # Watch + kick (P6). kick_cmd = cortex.kick launcher (venv python + module).
+    # Empty = watch/kick off. Morning flag-pull reads night flag + morning_start.
+    outbox_kick_cmd: list | str | None = None
+    outbox_kick_text_chars: int = 200
+    outbox_receipt_text_chars: int = 120
+    outbox_kick_media_placeholder: str = "[media]"
+    # Marks a delivered note as bridge-sent (vs the resident session's own
+    # chat), so her phone can tell them apart at a glance. Empty disables.
+    outbox_note_prefix: str = "\U0001f4ee "
+    cortex_wake_state_file: str = ""
+    night_morning_start: str = "06:00"
+    timezone: str = "Australia/Melbourne"
 
     # Ack string overrides from [ack_overrides] — key -> {style -> template}
     ack_overrides: dict | None = None
@@ -80,16 +119,25 @@ def load_config(path: Path | None = None) -> Config:
         logger.warning("config load failed (%s); using defaults", e)
         return Config()
     cfg = Config()
-    session = data.get("session") or {}
-    if isinstance(session, dict) and "sessionend_command" in session:
-        val = session["sessionend_command"]
-        if isinstance(val, str):
-            cfg.sessionend_command = val
     loop = data.get("loop") or {}
     if isinstance(loop, dict) and "poll_interval_sec" in loop:
         val = loop["poll_interval_sec"]
         if isinstance(val, (int, float)) and val > 0:
             cfg.poll_interval_sec = float(val)
+    if isinstance(loop, dict) and "bubble_gap_sec" in loop:
+        val = loop["bubble_gap_sec"]
+        if isinstance(val, (int, float)) and val >= 0:
+            cfg.bubble_gap_sec = float(val)
+    if isinstance(loop, dict) and "bubble_cap" in loop:
+        val = loop["bubble_cap"]
+        if isinstance(val, int) and val >= 1:
+            cfg.bubble_cap = val
+    send = data.get("send") or {}
+    if isinstance(send, dict):
+        if "quota_wait_sec" in send:
+            val = send["quota_wait_sec"]
+            if isinstance(val, (int, float)) and val >= 0:
+                cfg.quota_wait_sec = float(val)
     user = data.get("user") or {}
     if isinstance(user, dict) and "target_wxid" in user:
         val = user["target_wxid"]
@@ -105,16 +153,65 @@ def load_config(path: Path | None = None) -> Config:
         val = debug["raw_poll_log_until"]
         if isinstance(val, str):
             cfg.raw_poll_log_until = val
+<<<<<<< HEAD
     persona = data.get("persona") or {}
     if isinstance(persona, dict) and "user_name" in persona:
         val = persona["user_name"]
         if isinstance(val, str):
             cfg.user_name = val
+=======
+    outbox = data.get("outbox") or {}
+    if isinstance(outbox, dict):
+        pi = outbox.get("poll_interval_s")
+        if isinstance(pi, (int, float)) and not isinstance(pi, bool) and pi > 0:
+            cfg.outbox_poll_interval_s = float(pi)
+        rm = outbox.get("retry_max")
+        if isinstance(rm, int) and not isinstance(rm, bool) and rm >= 1:
+            cfg.outbox_retry_max = rm
+        kc = outbox.get("kick_cmd")
+        if isinstance(kc, list):
+            cfg.outbox_kick_cmd = [str(x) for x in kc]
+        elif isinstance(kc, str) and kc.strip():
+            cfg.outbox_kick_cmd = kc
+        ktc = outbox.get("kick_text_chars")
+        if isinstance(ktc, int) and not isinstance(ktc, bool) and ktc > 0:
+            cfg.outbox_kick_text_chars = ktc
+        rtc = outbox.get("receipt_text_chars")
+        if isinstance(rtc, int) and not isinstance(rtc, bool) and rtc > 0:
+            cfg.outbox_receipt_text_chars = rtc
+        kmp = outbox.get("kick_media_placeholder")
+        if isinstance(kmp, str) and kmp.strip():
+            cfg.outbox_kick_media_placeholder = kmp
+        if "note_prefix" in outbox and isinstance(outbox["note_prefix"], str):
+            cfg.outbox_note_prefix = outbox["note_prefix"]
+    cortex = data.get("cortex") or {}
+    if isinstance(cortex, dict):
+        ws = cortex.get("wake_state_file")
+        if isinstance(ws, str):
+            cfg.cortex_wake_state_file = ws
+        ms = cortex.get("morning_start")
+        if isinstance(ms, str) and ms.strip():
+            cfg.night_morning_start = ms
+    core = data.get("core") or {}
+    if isinstance(core, dict) and isinstance(core.get("timezone"), str):
+        cfg.timezone = core["timezone"]
+>>>>>>> upstream/main
     provider = data.get("provider") or {}
     if isinstance(provider, dict) and "cc_cwd" in provider:
         val = provider["cc_cwd"]
         if isinstance(val, str):
             cfg.cc_cwd = val
+    if isinstance(provider, dict):
+        soft = provider.get("idle_soft_s")
+        if isinstance(soft, (int, float)) and not isinstance(soft, bool) and soft > 0:
+            cfg.idle_soft_s = float(soft)
+        hard = provider.get("idle_hard_s")
+        if isinstance(hard, (int, float)) and not isinstance(hard, bool) and hard > 0:
+            cfg.idle_hard_s = float(hard)
+        cap = provider.get("turn_output_cap")
+        if isinstance(cap, int) and not isinstance(cap, bool):
+            cfg.turn_output_cap = cap
+    session = data.get("session") or {}
     if isinstance(session, dict):
         for field_name in (
             "session_record_command",

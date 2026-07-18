@@ -12,10 +12,16 @@ MODEL_ALIASES: dict[str, str] = {
     "4.8": "claude-opus-4-8[1m]",
     "5": "claude-fable-5[1m]",
     "opus": "claude-opus-4-8[1m]",
+<<<<<<< HEAD
     "sonnet": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5-20251001",
     "fable": "claude-fable-5[1m]",
     "codex": "codex",
+=======
+    "sonnet": "sonnet",
+    "haiku": "haiku",
+    "fable": "claude-fable-5",
+>>>>>>> upstream/main
 }
 
 # Aliases safe for bare-text natural matching (no slash prefix).
@@ -26,8 +32,8 @@ MODEL_NAMES: dict[str, str] = {
     "claude-opus-4-6": "Opus 4.6",
     "claude-opus-4-7": "Opus 4.7",
     "claude-opus-4-8": "Opus 4.8",
-    "claude-sonnet-4-6": "Sonnet 4.6",
-    "claude-haiku-4-5-20251001": "Haiku 4.5",
+    "sonnet": "Sonnet",
+    "haiku": "Haiku",
     "claude-fable-5": "Fable 5",
     "codex": "Codex",
 }

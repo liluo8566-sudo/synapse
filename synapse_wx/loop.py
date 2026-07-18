@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from synapse_core import heartbeat, last_active
+from synapse_core import cortex_kick, heartbeat, last_active
 from synapse_core.qidu_notebook import NotebookSync
 from synapse_core.qidu_signal import QiduSignalPoller
 from synapse_core.text_filters import strip_html_comments
@@ -29,7 +29,12 @@ from synapse_core.providers.base import Provider
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.sessionend.idle import IdleFireLoop
 from synapse_core.sessionend.tracker import SessionTracker
-from .split import format_thinking_bubbles, split_for_wechat_typed
+from . import outbox
+from .split import (
+    format_thinking_bubbles,
+    merge_bubbles_to_cap,
+    split_for_wechat_typed,
+)
 from synapse_core.state import BridgeState
 from .typing_ping import TypingPing
 
@@ -37,7 +42,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ALERT_DIR = Path.home() / ".config" / "synapse-wx" / "alerts"
 DEFAULT_MEDIA_DIR = Path.home() / ".config" / "synapse-wx" / "media"
-_BUBBLE_GAP_SEC = 0.2
+_DEFAULT_BUBBLE_GAP_SEC = 0.8
+_DEFAULT_BUBBLE_CAP = 10
 # Quote-lite (post-v4): cc emits a <quote>FRAGMENT</quote> block ANYWHERE in
 # the reply. The real ref_msg outbound path was attempted live but WeChat does
 # NOT render the bubble as a quote-reply (see MAP.md "Known limitations").
@@ -48,12 +54,6 @@ _QUOTE_TAG = re.compile(
     r"<quote>(.*?)</quote>\n?", re.DOTALL | re.IGNORECASE
 )
 _FAKE_QUOTE_PREFIX = "▎"
-# Pre-send merge: prepended to the re-queued old body so cc knows its prior
-# answer never reached the user and it should answer the merged thread fresh.
-_MERGE_NOTE = (
-    "[bridge: your previous reply was dropped — new messages arrived "
-    "mid-turn. Answer the full merged message below.]"
-)
 # Truncate display fragment: 40 CN chars or 80 ASCII chars.
 _FAKE_QUOTE_CN_MAX = 40
 _FAKE_QUOTE_ASCII_MAX = 80
@@ -138,6 +138,15 @@ class MainLoop:
         self._registry = registry
         self._alerts = alerts
         self._cfg = cfg
+        # Config-first bubble pacing; falls back to default when cfg absent.
+        self._bubble_gap_sec = (
+            cfg.bubble_gap_sec if cfg is not None else _DEFAULT_BUBBLE_GAP_SEC
+        )
+        # Outbound-edge bubble cap (main defense vs iLink count quota): merge
+        # adjacent text bubbles until the turn fits within this many.
+        self._bubble_cap = (
+            cfg.bubble_cap if cfg is not None else _DEFAULT_BUBBLE_CAP
+        )
         # B1: best-effort sessions row writer. Default no-op so tests + mock
         # provider paths don't pay the marrow-CLI penalty.
         self._record_session = record_session or (lambda _sid, _model: None)
@@ -171,6 +180,9 @@ class MainLoop:
         self._announce_pending: bool = False
         self._announce_target: str = ""
         self._announce_text: str = ""
+        # Outbox scan gate: tick() fires every poll_interval_sec (~1s) but the
+        # outbox scan runs at its own cadence. 0.0 = due immediately next poll.
+        self._last_outbox_scan_ts: float = 0.0
         # E-polish /thinking: captured between _drain_recv → maybe_flush so we
         # can emit a single 【思考】 bubble per turn when state.thinking_on.
         self._last_thinking: str = ""
@@ -437,6 +449,151 @@ class MainLoop:
             with self._state_lock:
                 self._buffer.add(text)
 
+    # ── outbox (cross-channel note delivery) ───────────────────────
+
+    def _outbox_db(self) -> str:
+        if self._cfg is None or not self._cfg.marrow_db_path:
+            return ""
+        return str(Path(self._cfg.marrow_db_path).expanduser())
+
+    def sweep_outbox_orphans(self) -> None:
+        """Startup: fail any stale 'claimed' wx row (crash orphan), never resend."""
+        if self._cfg is None or not self._cfg.target_wxid:
+            return
+        db = self._outbox_db()
+        if not db:
+            return
+        for row_id in outbox.sweep_orphan_claimed(db):
+            logger.warning("outbox orphan claimed row #%d -> failed (not resent)", row_id)
+            if self._alerts is not None:
+                self._alerts.write(
+                    "warn", "wx_outbox_orphan",
+                    f"outbox row #{row_id} was claimed at crash — failed, not resent",
+                    source="synapse-wx",
+                    fingerprint="wx.outbox_orphan",
+                )
+
+    def _is_from_her(self, from_wxid: str | None) -> bool:
+        """Net-new sender-identity check: inbound from_wxid == [user].target_wxid.
+        Gates the watch/kick paths only."""
+        return bool(
+            self._cfg is not None
+            and self._cfg.target_wxid
+            and from_wxid
+            and from_wxid == self._cfg.target_wxid
+        )
+
+    def _inbound_from_her(self, text: str = "", media_type: str = "") -> None:
+        """Her message landed on wx -> claim any armed watches on wx (one kick),
+        and morning flag-pull (night flag + past morning_start -> kick). Never
+        raises; no-ops without kick_cmd. Reply path claims instantly. `text` =
+        her reply body (iLink already merges a caption into the same text item),
+        attached to the reply kick; `media_type` (e.g. "image") tags it as
+        "[<type>] <caption>" when present, or "[<type>]" alone for a caption-less
+        media turn — falls back to the config placeholder when the type is
+        unknown. wx has no native per-message timestamp (verified: absent from
+        the iLink payload, code and tests alike) so the F1 receipt bound uses
+        this poll tick's wallclock instead — sufficient because the bug is
+        same-poll-batch ordering, not exact send time."""
+        db = self._outbox_db()
+        kc = self._cfg.outbox_kick_cmd
+        caption = text.strip() if text else ""
+        if media_type:
+            kick_text = f"[{media_type}] {caption}" if caption else f"[{media_type}]"
+        elif caption:
+            kick_text = caption
+        else:
+            kick_text = self._cfg.outbox_kick_media_placeholder
+        inbound_at = self._wallclock().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            if db:
+                cortex_kick.stamp_receipts(
+                    db, "wx", kick_text,
+                    text_chars=self._cfg.outbox_receipt_text_chars,
+                    inbound_at=inbound_at)
+            ids = cortex_kick.claim_reply(db, "wx") if db else []
+            if ids:
+                note_id = ids[0] if len(ids) == 1 else ",".join(str(i) for i in ids)
+                cortex_kick.kick(kc, "reply", note_id=note_id, text=kick_text,
+                                 text_chars=self._cfg.outbox_kick_text_chars)
+            if cortex_kick.night_mode(self._cfg.cortex_wake_state_file) and \
+                    cortex_kick.past_morning_start(
+                        self._cfg.night_morning_start, self._cfg.timezone):
+                cortex_kick.kick(kc, "morning")
+        except Exception as e:
+            logger.warning("inbound-from-her kick failed: %s", e)
+
+    def _outbox_scan(self) -> None:
+        """Claim pending wx rows and deliver via ILink.send_text. Folded into
+        tick() so it fires only after a poll-ok (same guarantee as the restart
+        self-announce). No-ops without target_wxid."""
+        if self._cfg is None or not self._cfg.target_wxid:
+            return
+        db = self._outbox_db()
+        if not db:
+            return
+        now = self._clock()
+        if now - self._last_outbox_scan_ts < self._cfg.outbox_poll_interval_s:
+            return
+        self._last_outbox_scan_ts = now
+        # P6 watch_timeout: sent+armed rows past their timeout with no reply in
+        # events -> claim (armed->fired) + one kick each. Single-row UPDATE
+        # resolves any race with a concurrent reply claim (one winner).
+        try:
+            for w in cortex_kick.claim_timeouts(db, "wx"):
+                cortex_kick.kick(
+                    self._cfg.outbox_kick_cmd, "timeout",
+                    note_id=w["id"], minutes=w["minutes"])
+        except Exception as e:
+            logger.warning("watch_timeout kick failed: %s", e)
+        rows = outbox.claim_pending(db)
+        prefix = self._cfg.outbox_note_prefix
+        for row in rows:
+            body = prefix + (row["body"] or "") if prefix else (row["body"] or "")
+            self._deliver_outbox_row(row["id"], body)
+
+    def _deliver_outbox_row(self, row_id: int, body: str) -> None:
+        """Deliver one claimed row. send_text chunks + retries internally, so
+        retry_max here counts whole send_text CALLS (no stacked retry). A False
+        return means a chunk was rejected and later chunks abandoned — the row
+        is failed with an alert, never bubble-resent."""
+        db = self._outbox_db()
+        target = self._cfg.target_wxid
+        attempts = 0
+        for _ in range(self._cfg.outbox_retry_max):
+            attempts += 1
+            try:
+                ok = self._ilink.send_text(target, "", body)
+            except Exception as e:
+                logger.warning(
+                    "outbox row #%d send raised (attempt %d/%d): %s",
+                    row_id, attempts, self._cfg.outbox_retry_max, e,
+                )
+                continue
+            if ok:
+                outbox.mark_sent(db, row_id)
+                return
+            # Partial-chunk failure: send_text abandoned later chunks. Retrying
+            # the whole call would re-send delivered chunks — do not. Fail now.
+            logger.error("outbox row #%d -> partial-chunk failure, no resend", row_id)
+            outbox.mark_failed(db, row_id, retry_count=attempts)
+            self._alert_outbox_failed(row_id, attempts, partial=True)
+            return
+        outbox.mark_failed(db, row_id, retry_count=attempts)
+        logger.error("outbox row #%d -> failed after retries", row_id)
+        self._alert_outbox_failed(row_id, attempts, partial=False)
+
+    def _alert_outbox_failed(self, row_id: int, attempts: int, *, partial: bool) -> None:
+        if self._alerts is None:
+            return
+        reason = "partial-chunk failure" if partial else f"send failed after {attempts} attempts"
+        self._alerts.write(
+            "warn", "wx_outbox_failed",
+            f"outbox row #{row_id} {reason}",
+            source="synapse-wx",
+            fingerprint="wx.outbox_failed",
+        )
+
     def tick(self) -> None:
         """One inbound poll: route bridge commands; buffer the rest for the provider."""
         self._check_heartbeat()
@@ -459,6 +616,9 @@ class MainLoop:
                 logger.info("restart self-announce sent to %s", target)
             except Exception as e:
                 logger.warning("restart self-announce failed: %s", e)
+        # Outbox delivery shares the self-announce slot: only after a poll-ok,
+        # so iLink is warm and a claimed row never sends into a dead client.
+        self._outbox_scan()
         for msg in msgs or []:
             from_wxid = msg.get("from_wxid") or msg.get("from_user_id") or ""
             ctx_token = msg.get("context_token") or ""
@@ -479,7 +639,9 @@ class MainLoop:
                 logger.warning("extract_text failed: %s", e)
                 text = ""
             # C0: surface media events alongside text so a pure-media bubble
-            # (e.g. just a photo, no caption) still triggers a turn.
+            # (e.g. just a photo, no caption) still triggers a turn. Extracted
+            # ahead of the inbound-from-her call below so the receipt/kick
+            # text can carry a media-type tag (F2), not just the bare caption.
             media_events: list[dict] = []
             extract_media = getattr(self._ilink, "extract_media", None)
             if extract_media is not None:
@@ -488,6 +650,12 @@ class MainLoop:
                 except Exception as e:
                     logger.warning("extract_media failed: %s", e)
                     media_events = []
+            # P6: inbound from her (from_wxid == target) drives watch-reply +
+            # morning flag-pull kicks. Any other sender is ignored here. Her
+            # reply text rides the reply kick (extracted above; "" for media).
+            if self._is_from_her(from_wxid):
+                media_type = media_events[0].get("type", "") if media_events else ""
+                self._inbound_from_her(text, media_type=media_type)
             if not text and not media_events:
                 continue
             # E-polish quote (inbound): iLink may carry a `reference` field on
@@ -571,12 +739,14 @@ class MainLoop:
                 label = "these images" if n_images > 1 else "this image"
                 if desc:
                     body = (
-                        f"[sticker-save] Save {label} as sticker via sticker_ingest."
+                        f"[sticker-save] Save {label} as sticker via "
+                        f"sticker_admin(action='ingest')."
                         f" Desc: {desc}"
                     )
                 else:
                     body = (
-                        f"[sticker-save] Save {label} as sticker via sticker_ingest."
+                        f"[sticker-save] Save {label} as sticker via "
+                        f"sticker_admin(action='ingest')."
                         f" Use vision to write desc."
                     )
                 logger.info(
@@ -590,22 +760,53 @@ class MainLoop:
             instruction = build_read_tool_instruction(media_paths)
             assembled = f"{assembled}\n\n{instruction}" if assembled else instruction
 
-        try:
-            # Lazy typing: fire indicator at the moment cc actually starts
-            # thinking — NOT during the debounce buffer wait. Showing
-            # "正在输入中" while the bridge is silently buffering would be
-            # misleading: cc isn't working yet.
-            if from_wxid and self._typing_ping is None:
-                self._typing_ping = TypingPing(
-                    self._ilink, from_wxid, ctx_token, interval=5.0
+        # Retry-once: a mid-turn stall/death respawns resuming the same sid and
+        # re-sends the SAME body ONCE. Second failure -> _handle_provider_dead
+        # (alert + user bubble). Outbound only fires from completed events, so a
+        # retried turn double-sends nothing.
+        reply_text = None
+        for attempt in range(2):
+            try:
+                # Lazy typing: fire indicator at the moment cc actually starts
+                # thinking — NOT during the debounce buffer wait. Showing
+                # "正在输入中" while the bridge is silently buffering would be
+                # misleading: cc isn't working yet.
+                if from_wxid and self._typing_ping is None:
+                    self._typing_ping = TypingPing(
+                        self._ilink, from_wxid, ctx_token, interval=5.0
+                    )
+                    self._typing_ping.start()
+                self._provider.send(assembled)
+                reply_text = self._drain_recv()
+                break
+            except ProviderDeadError as e:
+                if attempt == 0:
+                    logger.warning("provider dead mid-turn, retrying once: %s", e)
+                    if not self._ensure_provider():
+                        self._stop_typing()
+                        self._handle_provider_dead(e, from_wxid, ctx_token)
+                        return
+                    continue
+                self._stop_typing()
+                self._handle_provider_dead(e, from_wxid, ctx_token)
+                return
+
+        # Turn output cap: the provider interrupted a runaway turn (brake, not
+        # a failure — no retry). Notify the user; the partial reply below still
+        # ships. Best-effort, never blocks the outbound path.
+        if (
+            from_wxid
+            and self._provider is not None
+            and getattr(self._provider, "turn_output_capped", False)
+        ):
+            try:
+                self._ilink.send_text(
+                    from_wxid,
+                    ctx_token,
+                    messages.t("provider.turn_capped", self.state.voice_style),
                 )
-                self._typing_ping.start()
-            self._provider.send(assembled)
-            reply_text = self._drain_recv()
-        except ProviderDeadError as e:
-            self._stop_typing()
-            self._handle_provider_dead(e, from_wxid, ctx_token)
-            return
+            except Exception as e:
+                logger.warning("turn-cap notice send failed: %s", e)
 
         # B6: stamp the cross-channel last-active pointer once we have a sid.
         # Best-effort; never blocks the outbound path. Injected turns
@@ -673,10 +874,39 @@ class MainLoop:
                 bubbles = [{"kind": "text", "text": s} for s in tbs] + bubbles
         # Reset per-turn so a stale thinking buffer never leaks into the next.
         self._last_thinking = ""
+        # Hard bubble cap at the outbound edge (main quota defense): merge
+        # adjacent text bubbles until the turn fits within _bubble_cap. Media
+        # bubbles never merge and keep their order.
+        if len(bubbles) > self._bubble_cap:
+            bubbles = merge_bubbles_to_cap(bubbles, self._bubble_cap)
+        total = len(bubbles)
         for i, bubble in enumerate(bubbles):
             try:
                 if bubble.get("kind") == "text":
-                    self._ilink.send_text(from_wxid, ctx_token, bubble["text"])
+                    sent = self._ilink.send_text(from_wxid, ctx_token, bubble["text"])
+                    if not sent:
+                        lost = total - i
+                        logger.warning(
+                            "send_text rejected bubble %d/%d — %d bubble(s) lost",
+                            i + 1,
+                            total,
+                            lost,
+                        )
+                        if self._alerts is not None:
+                            try:
+                                self._alerts.write(
+                                    "warn",
+                                    "wx_send_rejected",
+                                    f"send_text rejected at bubble {i + 1}/{total}; "
+                                    f"{lost} bubble(s) of the turn lost",
+                                    source="loop.maybe_flush",
+                                    fingerprint="wx.send_rejected",
+                                )
+                            except Exception as ae:
+                                logger.warning("alerts.write failed: %s", ae)
+                        if i == 0:
+                            self._stop_typing()
+                        break
                 else:
                     ok = dispatch_media_bubble(
                         self._ilink,
@@ -692,8 +922,8 @@ class MainLoop:
                         )
                         if i == 0:
                             self._stop_typing()
-                        if i < len(bubbles) - 1:
-                            self._sleeper(_BUBBLE_GAP_SEC)
+                        if i < total - 1:
+                            self._sleeper(self._bubble_gap_sec)
                         continue
             except Exception as e:
                 self._stop_typing()
@@ -701,8 +931,8 @@ class MainLoop:
                 break
             if i == 0:
                 self._stop_typing()
-            if i < len(bubbles) - 1:
-                self._sleeper(_BUBBLE_GAP_SEC)
+            if i < total - 1:
+                self._sleeper(self._bubble_gap_sec)
 
     def _maybe_drain_autonomous(self) -> None:
         """Drain one buffered autonomous turn and deliver it if _last_from_wxid is set.

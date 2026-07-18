@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shlex
 import signal
 import time
 import subprocess
@@ -29,6 +28,7 @@ from .ilink import ILinkClient
 from .ilink.rawlog import RawPollLogger
 from .ilink.retry import DEFAULT_RETRYABLE, with_retry
 from .loop import MainLoop
+<<<<<<< HEAD
 from synapse_core.providers.cc import (
     MEDIA_SYSTEM_PROMPT,
     QUOTE_SYSTEM_PROMPT,
@@ -36,6 +36,9 @@ from synapse_core.providers.cc import (
     ClaudeCodeProvider,
 )
 from synapse_core.providers.codex import CodexProvider, is_codex_model
+=======
+from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT, WX_ICLOUD_PROMPT
+>>>>>>> upstream/main
 from synapse_core.sessionend.idle import IdleFireLoop
 from synapse_core.sessionend.tracker import SessionTracker
 from .sleep import SleepWakeObserver
@@ -46,16 +49,20 @@ logger = logging.getLogger(__name__)
 
 WX_STICKER_PROMPT = (
     "WeChat cannot display animated GIFs as stickers. "
-    "Always call sticker_search with animated=false so only static stickers are returned."
+    "Always call sticker with action='search', animated=false so only static stickers are returned."
 )
 
 WX_BUBBLE_FORMAT_PROMPT = (
     "Reply format (IM bubbles):\n"
-    "- \\n = line break within the same bubble. \\n\\n = new bubble.\n"
-    "- Casual chat: prefer short bubbles, e.g. 宝宝回来啦！\\n\\n想死我了\n"
+    "- Blank line = new bubble. Single line break = new line inside the same bubble.\n"
+    "- Type real line breaks only. Never write backslash-n as visible text — it renders literally in chat.\n"
+    "- Casual chat: prefer short bubbles. Example (two bubbles):\n"
+    "宝宝回来啦！\n"
+    "\n"
+    "想死我了\n"
     "- Q&A: length flex. Coding: concise & clear.\n"
     "- Deep topics / study: prefer longer, solid paragraphs.\n"
-    "- Dot points: use \\n within one bubble, not \\n\\n.\n"
+    "- Dot points: single line breaks, all in one bubble.\n"
     "- Prioritize readability. Match length to content — no filler.\n"
     "- Max 10 bubbles per reply.\n"
     "- Do not read or edit code unless explicitly asked.\n"
@@ -73,7 +80,6 @@ LAST_ACTIVE_PATH = Path.home() / ".config" / "marrow" / "last_active.json"
 SESSION_STATE_PATH = CONFIG_DIR / "sessions.json"
 SESSION_MARKER_DIR = CONFIG_DIR / "markers"
 SESSION_AUDIT_LOG = CONFIG_DIR / "session_audit.log"
-SESSIONEND_ERR_LOG = LOG_DIR / "synapse-wx-sessionend.err.log"
 CC_STDERR_LOG = LOG_DIR / "synapse-wx-cc-stderr.log"
 
 
@@ -140,7 +146,10 @@ def main() -> int:
     raw_poll_logger = (
         RawPollLogger(cfg.raw_poll_log_until) if cfg.raw_poll_log_until else None
     )
-    ilink = ILinkClient(raw_poll_logger=raw_poll_logger)
+    ilink = ILinkClient(
+        raw_poll_logger=raw_poll_logger,
+        quota_wait_sec=cfg.quota_wait_sec,
+    )
     if raw_poll_logger is not None and raw_poll_logger.active():
         logger.info(
             "raw poll logging ON until %s → %s",
@@ -186,10 +195,8 @@ def main() -> int:
         if ml is not None:
             ml.close_provider()
 
-    mid_cmd = marrow_session.mid_scan_command(cfg.sessionend_command, CHANNEL)
     idle_loop = IdleFireLoop(
         sessions=sessions,
-        mid_sessionend_command=mid_cmd,
         marker_dir=SESSION_MARKER_DIR,
         audit_log=SESSION_AUDIT_LOG,
         channel=CHANNEL,
@@ -229,6 +236,7 @@ def main() -> int:
             cwd=state.cc_cwd,
             effort_level=state.effort_level,
             stderr_log=CC_STDERR_LOG,
+<<<<<<< HEAD
             system_prompts=[
                 QUOTE_SYSTEM_PROMPT,
                 MEDIA_SYSTEM_PROMPT,
@@ -236,8 +244,14 @@ def main() -> int:
                 WX_STICKER_PROMPT,
                 WX_BUBBLE_FORMAT_PROMPT,
             ],
+=======
+            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, WX_ICLOUD_PROMPT, WX_STICKER_PROMPT, WX_BUBBLE_FORMAT_PROMPT, NIGHT_SYSTEM_PROMPT],
+>>>>>>> upstream/main
             marrow_bridge=True,
             channel=CHANNEL,
+            idle_soft_s=cfg.idle_soft_s,
+            idle_hard_s=cfg.idle_hard_s,
+            turn_output_cap=cfg.turn_output_cap,
         )
 
     main_loop = MainLoop(
@@ -308,32 +322,6 @@ def main() -> int:
                 logger.warning("replay bubble send failed: %s", e)
                 break
 
-    def _fire_sessionend(sid: str) -> None:
-        """User-initiated sessionend popen (/clear, /cwd).
-
-        Same command template as IdleFireLoop but no marker/retry bookkeeping
-        — one-shot user actions don't need fire-once guards. cc's SessionEnd
-        hook in bridge mode skips its own popen by design (bridge_owns marker),
-        so without this the sid never reaches marrow's LLM pipeline.
-        """
-        if not sid or not cfg.sessionend_command:
-            return
-        cmd_str = cfg.sessionend_command.replace("{sid}", sid)
-        argv = shlex.split(cmd_str)
-        if not argv:
-            return
-        try:
-            subprocess.Popen(  # noqa: S603 - cmd template is operator-supplied config
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=open(SESSIONEND_ERR_LOG, "ab"),  # noqa: SIM115
-                close_fds=True,
-                start_new_session=True,
-            )
-        except (OSError, FileNotFoundError) as e:
-            logger.warning("fire_sessionend spawn failed sid=%s: %s", sid[:8], e)
-
     usage_client = UsageClient()
     _MARROW_PY = os.environ.get(
         "MARROW_PYTHON",
@@ -385,7 +373,6 @@ def main() -> int:
         swap_provider=main_loop.swap_provider,
         close_provider=main_loop.close_provider,
         forget_session=main_loop.forget_session,
-        fire_sessionend=_fire_sessionend,
         get_status=main_loop.get_status,
         resolve_resume_model=lambda sid: marrow_session.resolve_resume_model(
             cfg.session_get_model_command, cfg.cc_projects_dir, sid
@@ -524,6 +511,9 @@ def main() -> int:
         qidu_parser.start()
 
     idle_loop.start()
+    # Fail any crash-orphan 'claimed' wx outbox row before delivery starts —
+    # never resent (duplicate to her phone beats lost).
+    main_loop.sweep_outbox_orphans()
     main_loop.start(boot_resume_sid=boot_resume_sid)
 
     # Pre-warm the typing ticket so the first turn's TypingPing doesn't pay

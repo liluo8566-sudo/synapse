@@ -310,6 +310,10 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
         "cn": "provider连续暴毙，先停手",
         "en": "[bridge: provider gave up]",
     },
+    "provider.turn_capped": {
+        "cn": "这轮输出太长，被 token 上限刹住了",
+        "en": "[bridge: this turn was interrupted by the token cap]",
+    },
     "bridge.error": {
         "cn": "💥桥炸了，再来一次 (ノ_<。)",
         "en": "[bridge: error, try again]",

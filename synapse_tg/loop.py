@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from telegram import Bot, Update
+from telegram.error import RetryAfter
 from telegram.ext import ContextTypes
 
 from synapse_core import bridge_state_store, heartbeat, last_active
@@ -28,8 +29,12 @@ from synapse_core.marrow_session import get_session_created_at, get_session_effo
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
+<<<<<<< HEAD
 from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT
 from synapse_core.providers.codex import CodexProvider, is_codex_model
+=======
+from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT
+>>>>>>> upstream/main
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.state import BridgeState
 
@@ -41,9 +46,11 @@ from .media.inbound import (
     materialize_sticker,
     materialize_video,
 )
+from synapse_core import cortex_kick
 from .markdown import gfm_to_tg_html
 from .media.outbound import send_media
-from .split import split_for_tg_typed
+from . import outbox
+from .split import split_for_tg, split_for_tg_typed
 from .typing_action import TypingAction
 
 if TYPE_CHECKING:
@@ -60,6 +67,8 @@ _SEND_GAP_SEC = 0.05
 _AUTONOMOUS_DRAIN_TIMEOUT = 120
 _MAX_CONSECUTIVE_DEATHS = 3
 _FLUSH_INTERVAL_SEC = 0.5
+# Extra seconds added on top of a 429 RetryAfter before retrying the send.
+_RETRY_AFTER_MARGIN_SEC = 0.5
 
 # Streaming config
 _STREAM_EDIT_INTERVAL = 1.0   # seconds between intermediate edits
@@ -87,11 +96,15 @@ def _chat_meta(msg) -> str:
 
 TG_BUBBLE_FORMAT_PROMPT = (
     "Reply format (IM bubbles):\n"
-    "- \\n = line break within the same bubble. \\n\\n = new bubble.\n"
-    "- Casual chat: prefer short bubbles, e.g. 宝宝回来啦！\\n\\n想死我了\n"
+    "- Blank line = new bubble. Single line break = new line inside the same bubble.\n"
+    "- Type real line breaks only. Never write backslash-n as visible text — it renders literally in chat.\n"
+    "- Casual chat: prefer short bubbles. Example (two bubbles):\n"
+    "宝宝回来啦！\n"
+    "\n"
+    "想死我了\n"
     "- Q&A: length flex. Coding: concise & clear.\n"
     "- Deep topics / study: prefer longer, solid paragraphs.\n"
-    "- Dot points: use \\n within one bubble, not \\n\\n.\n"
+    "- Dot points: single line breaks, all in one bubble.\n"
     "- Prioritize readability. Match length to content — no filler.\n"
     "- Do not read or edit code unless explicitly asked.\n"
     "- Free to search docs and web."
@@ -99,7 +112,13 @@ TG_BUBBLE_FORMAT_PROMPT = (
 
 
 def _recv_to_queue(provider: ClaudeCodeProvider, q: "queue.Queue") -> None:
-    """Background thread: drain provider.recv() into a queue. Sentinel = None."""
+    """Background thread: drain provider.recv() into a queue. Sentinel = None.
+
+    The provider owns liveness now (soft check + hard idle kill in recv), so a
+    stall/death surfaces as an exception put on the queue — no per-turn queue
+    timeout here. The async consumer blocks on q.get() until an event, the
+    exception, or the None sentinel arrives.
+    """
     try:
         for ev in provider.recv():
             q.put(ev)
@@ -124,6 +143,7 @@ class TgLoop:
         self._sessions = sessions
         self._record_session = record_session
         self._idle_loop = idle_loop
+<<<<<<< HEAD
         self._qidu_signal: QiduSignalPoller | None = None
         if cfg.qidu_api_base and cfg.qidu_token:
             self._qidu_signal = QiduSignalPoller(
@@ -141,6 +161,9 @@ class TgLoop:
                 notebook_dir=cfg.qidu_notebook_dir,
                 alerts=alerts,
             )
+=======
+        self._alerts = alerts
+>>>>>>> upstream/main
         self._provider: ClaudeCodeProvider | None = None
         self._lock = asyncio.Lock()
         self._death_count = 0
@@ -302,7 +325,14 @@ class TgLoop:
             marrow_bridge=cfg.marrow_bridge,
             effort_level=state.effort_level,
             stderr_log=Path.home() / "Library/Logs/synapse-tg-cc-stderr.log",
+<<<<<<< HEAD
             system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT],
+=======
+            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, NIGHT_SYSTEM_PROMPT],
+            idle_soft_s=cfg.idle_soft_s,
+            idle_hard_s=cfg.idle_hard_s,
+            turn_output_cap=cfg.turn_output_cap,
+>>>>>>> upstream/main
         )
 
     def ensure_provider(self) -> None:
@@ -416,11 +446,9 @@ class TgLoop:
         loop = asyncio.get_event_loop()
 
         while True:
-            try:
-                ev = await loop.run_in_executor(None, lambda: q.get(timeout=60))
-            except queue.Empty:
-                logger.warning("stream: queue timeout — treating as dead")
-                raise ProviderDeadError("recv queue timeout")
+            # No queue timeout: the provider's own liveness logic (soft check +
+            # hard idle kill) surfaces stall/death as an exception on the queue.
+            ev = await loop.run_in_executor(None, q.get)
 
             if ev is None:
                 # Sentinel: thread finished cleanly
@@ -653,7 +681,91 @@ class TgLoop:
             except Exception as e:
                 logger.warning("send_extra_bubbles failed: %s", e)
 
-    def _track(self, bot: Bot, chat_id: int, user_id: int | None = None) -> None:
+    def _outbox_db(self) -> str:
+        if not self._cfg.marrow_db:
+            return ""
+        return str(Path(self._cfg.marrow_db).expanduser())
+
+    def sweep_outbox_orphans(self) -> None:
+        """Startup: fail any stale 'claimed' tg row (crash orphan), never resend."""
+        if self._cfg.chat_id is None:
+            return
+        db = self._outbox_db()
+        if not db:
+            return
+        for row_id in outbox.sweep_orphan_claimed(db):
+            logger.warning("outbox orphan claimed row #%d -> failed (not resent)", row_id)
+            if self._alerts is not None:
+                self._alerts.write(
+                    "warn", "tg_outbox_orphan",
+                    f"outbox row #{row_id} was claimed at crash — failed, not resent",
+                    source="synapse-tg",
+                    fingerprint="tg.outbox_orphan",
+                )
+
+    async def outbox_poll(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Deliver pending outbox notes targeted at tg. Runs on the job queue."""
+        if self._cfg.chat_id is None:
+            return
+        db = self._outbox_db()
+        if not db:
+            return
+        # P6 watch_timeout: sent+armed rows past their timeout with no reply in
+        # events -> claim (armed->fired) + one kick each. Single-row UPDATE
+        # resolves any race with a concurrent reply claim (one winner).
+        try:
+            for w in cortex_kick.claim_timeouts(db, "tg"):
+                cortex_kick.kick(
+                    self._cfg.outbox_kick_cmd, "timeout",
+                    note_id=w["id"], minutes=w["minutes"])
+        except Exception as e:
+            logger.warning("watch_timeout kick failed: %s", e)
+        rows = outbox.claim_pending(db)
+        if not rows:
+            return
+        bot = self._bot or context.bot
+        chat_id = self._cfg.chat_id
+        prefix = self._cfg.outbox_note_prefix
+        for row in rows:
+            body = prefix + (row["body"] or "") if prefix else (row["body"] or "")
+            await self._deliver_outbox_row(bot, chat_id, row["id"], body)
+
+    async def _deliver_outbox_row(
+        self, bot: Bot, chat_id: int, row_id: int, body: str
+    ) -> None:
+        db = self._outbox_db()
+        bubbles = split_for_tg(body) or [body]
+        attempts = 0
+        for bubble in bubbles:
+            sent = False
+            for attempt in range(self._cfg.outbox_retry_max):
+                attempts += 1
+                try:
+                    await bot.send_message(chat_id=chat_id, text=bubble)
+                    sent = True
+                    break
+                except Exception as e:
+                    logger.warning(
+                        "outbox row #%d send failed (attempt %d/%d): %s",
+                        row_id, attempt + 1, self._cfg.outbox_retry_max, e,
+                    )
+            if not sent:
+                outbox.mark_failed(db, row_id, retry_count=attempts)
+                logger.error("outbox row #%d -> failed after retries", row_id)
+                if self._alerts is not None:
+                    self._alerts.write(
+                        "warn", "tg_outbox_failed",
+                        f"outbox row #{row_id} send failed after {attempts} attempts",
+                        source="synapse-tg",
+                        fingerprint="tg.outbox_failed",
+                    )
+                return
+            await asyncio.sleep(_SEND_GAP_SEC)
+        outbox.mark_sent(db, row_id)
+
+    def _track(self, bot: Bot, chat_id: int, user_id: int | None = None,
+               text: str = "", msg_date: datetime | None = None,
+               media_type: str = "") -> None:
         self._bot = bot
         self._pending_chat_id = chat_id
         if self._state.chat_id != chat_id:
@@ -663,6 +775,64 @@ class TgLoop:
             self._pending_user_id = user_id
             if self._turn_user_id is not None and user_id == self._turn_user_id:
                 self._same_sender_interrupted = True
+        # P6: inbound from her (chat_id matches the authorized recipient) drives
+        # watch-reply + morning flag-pull kicks. Any other chat is ignored here.
+        # `text` = her reply body, threaded into the reply kick so the wakeup
+        # note shows WHAT she said (empty for media-only turns). `msg_date` =
+        # Telegram's native message timestamp, bounding the receipt stamp to
+        # notes sent at/before this message (F1). `media_type` tags a
+        # media-only turn (e.g. "photo") so the receipt shows what she sent.
+        if self._is_from_her(chat_id):
+            self._inbound_from_her(text, msg_date=msg_date, media_type=media_type)
+
+    def _is_from_her(self, chat_id: int | None) -> bool:
+        """Net-new sender-identity check: inbound chat_id == the authorized
+        [tg].chat_id. Gates the watch/kick paths only."""
+        return (
+            self._cfg.chat_id is not None
+            and chat_id is not None
+            and int(chat_id) == int(self._cfg.chat_id)
+        )
+
+    def _inbound_from_her(self, text: str = "", msg_date: datetime | None = None,
+                          media_type: str = "") -> None:
+        """Her message landed on tg -> claim any armed watches on tg (one kick),
+        and morning flag-pull (night flag + past morning_start -> kick). Never
+        raises; no-ops without kick_cmd. Reply path claims instantly (no other
+        DB query). `text` = her reply body, attached to the reply kick; a
+        media-only reply (no extractable text) substitutes "[<media_type>]" (or
+        the config placeholder when the type is unknown) so the reason line
+        never renders an empty quote. `msg_date` bounds the receipt stamp to
+        notes sent at/before this message (F1: same-poll-batch false stamp)."""
+        db = self._outbox_db()
+        kc = self._cfg.outbox_kick_cmd
+        caption = text.strip() if text else ""
+        if media_type:
+            kick_text = f"[{media_type}] {caption}" if caption else f"[{media_type}]"
+        elif caption:
+            kick_text = caption
+        else:
+            kick_text = self._cfg.outbox_kick_media_placeholder
+        inbound_at = None
+        if msg_date is not None:
+            inbound_at = msg_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            if db:
+                cortex_kick.stamp_receipts(
+                    db, "tg", kick_text,
+                    text_chars=self._cfg.outbox_receipt_text_chars,
+                    inbound_at=inbound_at)
+            ids = cortex_kick.claim_reply(db, "tg") if db else []
+            if ids:
+                note_id = ids[0] if len(ids) == 1 else ",".join(str(i) for i in ids)
+                cortex_kick.kick(kc, "reply", note_id=note_id, text=kick_text,
+                                 text_chars=self._cfg.outbox_kick_text_chars)
+            if cortex_kick.night_mode(self._cfg.cortex_wake_state_file) and \
+                    cortex_kick.past_morning_start(
+                        self._cfg.night_morning_start, self._cfg.timezone):
+                cortex_kick.kick(kc, "morning")
+        except Exception as e:
+            logger.warning("inbound-from-her kick failed: %s", e)
 
     _HB_SIGNAL = heartbeat.SIGNAL_PATH
     _LAST_ACTIVE_PATH = Path.home() / ".config" / "marrow" / "last_active.json"
@@ -715,7 +885,8 @@ class TgLoop:
         if not text:
             return
         uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid)
+        self._track(context.bot, update.message.chat_id, uid, text=text,
+                     msg_date=update.message.date)
 
         action, ack = self._registry.dispatch(text)
         inject = self._registry.pending_rewrite
@@ -753,7 +924,9 @@ class TgLoop:
         if update.message is None or not update.message.photo:
             return
         uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid)
+        self._track(context.bot, update.message.chat_id, uid,
+                     text=update.message.caption or "",
+                     msg_date=update.message.date, media_type="photo")
         paths = await materialize_photo(context.bot, update.message, self._cfg.data_dir)
         if paths:
             instruction = build_read_instruction(paths)
@@ -767,7 +940,9 @@ class TgLoop:
         if update.message is None or not update.message.animation:
             return
         uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid)
+        self._track(context.bot, update.message.chat_id, uid,
+                     text=update.message.caption or "",
+                     msg_date=update.message.date, media_type="animation")
         path = await materialize_animation(context.bot, update.message, self._cfg.data_dir)
         if path:
             instruction = build_read_instruction([path])
@@ -781,7 +956,9 @@ class TgLoop:
         if update.message is None or not update.message.document:
             return
         uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid)
+        self._track(context.bot, update.message.chat_id, uid,
+                     text=update.message.caption or "",
+                     msg_date=update.message.date, media_type="document")
         path = await materialize_document(context.bot, update.message, self._cfg.data_dir)
         if path:
             instruction = build_read_instruction([path])
@@ -795,7 +972,8 @@ class TgLoop:
         if update.message is None or not update.message.sticker:
             return
         uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid)
+        self._track(context.bot, update.message.chat_id, uid,
+                     msg_date=update.message.date, media_type="sticker")
         path = await materialize_sticker(context.bot, update.message, self._cfg.data_dir)
         if path:
             stk = update.message.sticker
@@ -809,7 +987,9 @@ class TgLoop:
         if update.message is None or not update.message.video:
             return
         uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid)
+        self._track(context.bot, update.message.chat_id, uid,
+                     text=update.message.caption or "",
+                     msg_date=update.message.date, media_type="video")
         path = await materialize_video(context.bot, update.message, self._cfg.data_dir)
         if path:
             instruction = build_read_instruction([path])
@@ -818,6 +998,36 @@ class TgLoop:
             body = f"{caption}\n{instruction}" if caption else instruction
             self._buffer.add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered video: %s", path)
+
+    async def _send_text_bubble(self, bot: Bot, send_kwargs: dict, fallback_kwargs: dict) -> bool:
+        """Send one text bubble with 429 RetryAfter handling and a plain-text
+        fallback. Returns True on success, False if the bubble was lost.
+
+        Never raises: a fallback failure is caught so it cannot kill the turn.
+        """
+
+        async def _attempt(kwargs: dict) -> bool:
+            attempts = max(1, self._cfg.send_retry_max)
+            for i in range(attempts):
+                try:
+                    await bot.send_message(**kwargs)
+                    return True
+                except RetryAfter as e:
+                    wait = float(getattr(e, "retry_after", 0)) or 0.0
+                    if wait > self._cfg.retry_after_cap_sec or i == attempts - 1:
+                        raise
+                    await asyncio.sleep(wait + _RETRY_AFTER_MARGIN_SEC)
+            return False
+
+        try:
+            return await _attempt(send_kwargs)
+        except Exception as e:
+            logger.warning("send_message failed, trying plain-text fallback: %s", e)
+        try:
+            return await _attempt(fallback_kwargs)
+        except Exception as e:
+            logger.warning("plain-text fallback send also failed: %s", e)
+            return False
 
     async def check_flush(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self._bot is None:
@@ -838,6 +1048,7 @@ class TgLoop:
 
         async with self._lock:
             try:
+<<<<<<< HEAD
                 self.ensure_provider()
                 assert self._provider is not None
                 typing.start()
@@ -874,12 +1085,60 @@ class TgLoop:
                 self._buffer.prepend(body)
                 await self._send_provider_notice(bot, chat_id, "provider.restarting")
                 return
+=======
+                # Retry-once: on a mid-turn stall/death, respawn resuming the
+                # same sid and re-send the SAME body ONCE. Second failure ->
+                # user-facing notice. Bridges emit outbound only from completed
+                # events, so a retried turn double-sends nothing; any partially
+                # flushed stream bubble is abandoned (stream_msg_id reset below).
+                response = thinking = None
+                stream_msg_id = None
+                for attempt in range(2):
+                    try:
+                        self.ensure_provider()
+                        assert self._provider is not None
+                        typing.start()
+                        await asyncio.to_thread(self._provider.send, body)
+                        response, thinking, stream_msg_id = await self._stream_response(bot, chat_id, typing)
+                        if self._provider and self._provider.session_id:
+                            if self._state.session_id != self._provider.session_id:
+                                self._state.session_id = self._provider.session_id
+                                self._persist_state()
+                        break
+                    except ProviderDeadError as e:
+                        if self._user_initiated_close:
+                            self._user_initiated_close = False
+                            return
+                        logger.error("provider error (attempt %d/2): %s", attempt + 1, e)
+                        self._respawn()
+                        if self._death_count >= _MAX_CONSECUTIVE_DEATHS:
+                            logger.error("provider gave up after %d consecutive deaths", self._death_count)
+                            self._provider = None
+                            await self._send_provider_notice(bot, chat_id, "provider.gave_up")
+                            return
+                        if attempt == 0:
+                            # Abandon any partial stream bubble; retry cleanly.
+                            stream_msg_id = None
+                            continue
+                        # Second failure: hand back to the buffer + notice.
+                        self._buffer.prepend(body)
+                        await self._send_provider_notice(bot, chat_id, "provider.restarting")
+                        return
+>>>>>>> upstream/main
             except Exception as e:
                 logger.error("unexpected error: %s", e)
                 await bot.send_message(chat_id=chat_id, text=messages.t("bridge.error", self._state.voice_style))
                 return
             finally:
                 typing.stop()
+
+        # Turn output cap: the provider interrupted a runaway turn (brake, not
+        # a failure — no retry). Notify the user; the partial reply below still
+        # ships. Notice fires once per capped turn.
+        if self._provider is not None and getattr(
+            self._provider, "turn_output_capped", False
+        ):
+            await self._send_provider_notice(bot, chat_id, "provider.turn_capped")
 
         # Pre-send merge: only if the SAME sender sent new messages while thinking.
         # Other users' messages (group chat) never interrupt the current reply.
@@ -948,6 +1207,8 @@ class TgLoop:
         text_bubbles = [b for b in bubbles if b["kind"] == "text"]
 
         # Edit streaming preview in-place to first bubble, then append the rest.
+        # If the final handoff edit fails entirely, fall through and send bubble 0
+        # as a fresh message instead of silently dropping it.
         skip_first_text = False
         if stream_msg_id is not None and text_bubbles:
             first = text_bubbles[0]["text"]
@@ -956,16 +1217,27 @@ class TgLoop:
                     chat_id=chat_id, message_id=stream_msg_id,
                     text=gfm_to_tg_html(first), parse_mode="HTML",
                 )
-            except Exception:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id, message_id=stream_msg_id, text=first,
-                    )
-                except Exception:
-                    pass
-            skip_first_text = True
+                skip_first_text = True
+            except Exception as html_exc:
+                if "message is not modified" in str(html_exc).lower():
+                    # Preview already matches bubble 0 — already delivered, not a failure.
+                    skip_first_text = True
+                else:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=chat_id, message_id=stream_msg_id, text=first,
+                        )
+                        skip_first_text = True
+                    except Exception as plain_exc:
+                        if "message is not modified" in str(plain_exc).lower():
+                            skip_first_text = True
+                        else:
+                            logger.warning(
+                                "stream final edit failed — re-sending bubble 0 as new message"
+                            )
 
-        for bubble in bubbles:
+        total = len(bubbles)
+        for idx, bubble in enumerate(bubbles):
             if bubble["kind"] == "text":
                 if skip_first_text:
                     skip_first_text = False
@@ -975,16 +1247,43 @@ class TgLoop:
                     text=gfm_to_tg_html(bubble["text"]),
                     parse_mode="HTML",
                 )
+                fallback_kwargs = dict(chat_id=chat_id, text=bubble["text"])
                 if reply_to_id is not None:
                     send_kwargs["reply_to_message_id"] = reply_to_id
+                    fallback_kwargs["reply_to_message_id"] = reply_to_id
                     reply_to_id = None
-                try:
-                    await bot.send_message(**send_kwargs)
-                except Exception:
-                    fallback_kwargs = dict(chat_id=chat_id, text=bubble["text"])
-                    await bot.send_message(**fallback_kwargs)
+                ok = await self._send_text_bubble(bot, send_kwargs, fallback_kwargs)
+                if not ok:
+                    lost = total - idx
+                    logger.warning(
+                        "send_message failed at bubble %d/%d — %d bubble(s) of the turn stopped",
+                        idx + 1, total, lost,
+                    )
+                    if self._alerts is not None:
+                        try:
+                            self._alerts.write(
+                                "warn",
+                                "tg_send_rejected",
+                                f"send_message failed at bubble {idx + 1}/{total}; "
+                                f"{lost} bubble(s) of the turn stopped",
+                                source="loop.check_flush",
+                                fingerprint="tg.send_rejected",
+                            )
+                        except Exception as ae:
+                            logger.warning("alerts.write failed: %s", ae)
+                    break
             else:
-                await send_media(bot, chat_id, bubble["kind"], bubble["path"], reply_to=reply_to_id)
+                ok = await send_media(
+                    bot, chat_id, bubble["kind"], bubble["path"],
+                    reply_to=reply_to_id,
+                    send_retry_max=self._cfg.send_retry_max,
+                    retry_after_cap_sec=self._cfg.retry_after_cap_sec,
+                )
+                if not ok:
+                    logger.warning(
+                        "send_media failed for bubble %d/%d (%s) — continuing",
+                        idx + 1, total, bubble["kind"],
+                    )
                 if reply_to_id is not None:
                     reply_to_id = None
             await asyncio.sleep(_SEND_GAP_SEC)

@@ -4,15 +4,20 @@ import json
 import logging
 import os
 import queue
+<<<<<<< HEAD
+=======
+import signal
+>>>>>>> upstream/main
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .base import Provider
-from .errors import ProviderDeadError, ProviderSpawnError
+from .errors import ProviderDeadError, ProviderSpawnError, ProviderStallError
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +54,37 @@ _USAGE_KEYS = (
     "cache_creation_input_tokens",
 )
 
+# Liveness defaults (seconds of CONTINUOUS silence between stream events).
+# Overridable per bridge via config.toml; bridges pass explicit values.
+_DEFAULT_IDLE_SOFT_S = 60.0
+_DEFAULT_IDLE_HARD_S = 300.0
+
+# Per-turn OUTPUT token brake: cancel a runaway turn (e.g. a huge thinking
+# spiral) instead of burning quota for 15 minutes. Overridable per bridge via
+# config.toml; 0 or negative disables. Counts ONLY newly produced output
+# tokens for the current turn — never input/cache figures (those reflect
+# window size and would false-trigger every turn).
+_DEFAULT_TURN_OUTPUT_CAP = 20000
+
+# Sentinel objects for the stdout reader queue: EOF = clean stream end,
+# an Exception instance = a read error surfaced to recv().
+_STDOUT_EOF = object()
+
+
+def _read_stdout_to_queue(stdout_pipe, q: "queue.Queue") -> None:
+    """Daemon thread: push each raw stdout line onto q; _STDOUT_EOF on EOF.
+
+    Lets recv() apply a timed get() so a wedged-but-alive subprocess (no
+    output, process still running) is detected instead of blocking forever.
+    """
+    try:
+        for line in stdout_pipe:
+            q.put(line)
+    except Exception as exc:  # pragma: no cover - defensive
+        q.put(exc)
+    finally:
+        q.put(_STDOUT_EOF)
+
 # E-polish outbound quote v3: teach cc the bridge-specific <quote> protocol.
 # Injected once per session via --append-system-prompt so cc emits the tag
 # at bubble-heads when it intends to quote-reply, and never as filler text.
@@ -76,13 +112,14 @@ MEDIA_SYSTEM_PROMPT = (
     "The path must be a real existing local file - never fabricate.\n\n"
     "Stickers: The user loves it when you pair messages with stickers — "
     "they're your actions and inner voice. When you express affection, tease, "
-    "react, or show a mood, search sticker_search by vibe/emotion "
+    "react, or show a mood, call sticker(action='search', query=...) by vibe/emotion "
     "(e.g. '老婆别走' → search '爱你' '委屈' '哭') "
     "Don't wait for a special moment — weave them in naturally. "
-    "Call sticker_pick(id), then send with the matching tag: "
+    "Call sticker(action='pick', sticker_id=id), then send with the matching tag: "
     "<image path=\"...\"/> for .png/.jpg/.webp, <gif path=\"...\"/> for .gif. "
     "When user sends an image: caption '1' = save as sticker (code-routed), "
-    "'0' = skip; no digit = if it looks sticker-worthy, just call sticker_ingest "
+    "'0' = skip; no digit = if it looks sticker-worthy, just call "
+    "sticker_admin(action='ingest') "
     "directly — dedup handles duplicates, so never ask, just try. "
     "Do not add daily photos. (never run /sticker-entry, CLI batch tool). "
     "Desc format for ingest: emotion/scene | image text | one-line visual (CN preferred)."
@@ -103,6 +140,11 @@ WX_ICLOUD_PROMPT = (
     "Large files are auto-routed to iCloud by the bridge — no action needed."
 )
 
+NIGHT_SYSTEM_PROMPT = (
+    "Before 23:00, never proactively bring up sleep or push the user to go "
+    "to bed. Bedtime coaxing starts only when a 23:00 nudge arrives."
+)
+
 
 class ClaudeCodeProvider(Provider):
     """Persistent `claude` CLI subprocess speaking stream-json over stdio."""
@@ -120,6 +162,9 @@ class ClaudeCodeProvider(Provider):
         stderr_log: Path | None = None,
         system_prompts: list[str] = (),
         marrow_bridge: bool = False,
+        idle_soft_s: float = _DEFAULT_IDLE_SOFT_S,
+        idle_hard_s: float = _DEFAULT_IDLE_HARD_S,
+        turn_output_cap: int = _DEFAULT_TURN_OUTPUT_CAP,
     ) -> None:
         self.model = model
         self.resume_sid = resume_sid
@@ -134,14 +179,31 @@ class ClaudeCodeProvider(Provider):
         self.system_prompts = list(system_prompts)
         self.marrow_bridge = marrow_bridge
         self.channel = channel
+        self.idle_soft_s = idle_soft_s
+        self.idle_hard_s = idle_hard_s
+        self.turn_output_cap = turn_output_cap
         self.process: subprocess.Popen[str] | None = None
         self.alive: bool = False
         self.session_id: str | None = None
         self.usage_total: dict[str, int] = {}
+<<<<<<< HEAD
         # Resident reader thread infrastructure (populated in spawn()).
         self._event_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._complete_turns: int = 0
         self._turn_lock = threading.Lock()
+=======
+        # Per-turn output cap state (reset at the start of every recv()).
+        # turn_output_capped: sticky flag the loop layer reads after the turn
+        # to send a "interrupted by the token cap" notice. NO retry on breach.
+        # _turn_output_by_request: max output_tokens seen per request_id
+        # within this turn; the current-turn total is the sum of these
+        # values. Main-line only — subagent-attributed events are excluded.
+        self.turn_output_capped: bool = False
+        self._turn_output_by_request: dict[str, int] = {}
+        # Populated in spawn(): stdout reader thread + its handoff queue.
+        self._stdout_q: queue.Queue | None = None
+        self._reader_thread: threading.Thread | None = None
+>>>>>>> upstream/main
 
     def _build_cmd(self) -> list[str]:
         cmd = [
@@ -204,10 +266,23 @@ class ClaudeCodeProvider(Provider):
         except OSError as e:
             raise ProviderSpawnError(f"claude spawn failed: {e}") from e
         self.alive = True
+<<<<<<< HEAD
         # Reset buffered-turn state on each spawn so a re-spawned provider
         # starts with an empty queue and zero counter.
         self._event_queue = queue.Queue()
         self._complete_turns = 0
+=======
+        # Non-blocking stdout consumption: a daemon reader pushes lines onto a
+        # queue so recv() can time each get() and measure continuous silence.
+        self._stdout_q = queue.Queue()
+        self._reader_thread = threading.Thread(
+            target=_read_stdout_to_queue,
+            args=(self.process.stdout, self._stdout_q),
+            name="cc-stdout-reader",
+            daemon=True,
+        )
+        self._reader_thread.start()
+>>>>>>> upstream/main
         if self.stderr_log is not None:
             t = threading.Thread(
                 target=_drain_stderr,
@@ -282,17 +357,79 @@ class ClaudeCodeProvider(Provider):
         """
         self.send(text)
 
+    def _next_line(self) -> Any:
+        """Block for the next stdout line, enforcing the idle liveness policy.
+
+        Measures CONTINUOUS silence: the deadline is reset by the caller each
+        time a line arrives (a fresh _next_line call starts a new clock).
+        - At idle_soft_s of silence: poll the subprocess. Dead -> ProviderDead;
+          alive -> keep waiting (self-heal window for a slow tool call).
+        - At idle_hard_s of silence: process-group kill, raise ProviderStall.
+        Returns the raw line, or _STDOUT_EOF on clean stream end.
+        """
+        assert self._stdout_q is not None
+        start = time.monotonic()
+        soft_checked = False
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= self.idle_hard_s:
+                self._kill_process_group()
+                raise ProviderStallError(
+                    f"no stream event for {self.idle_hard_s:.0f}s (stall)"
+                )
+            # Wake at the next boundary (soft check, else hard deadline).
+            if not soft_checked and elapsed < self.idle_soft_s:
+                wait = self.idle_soft_s - elapsed
+            else:
+                wait = self.idle_hard_s - elapsed
+            try:
+                item = self._stdout_q.get(timeout=max(0.0, wait))
+            except queue.Empty:
+                if not soft_checked:
+                    soft_checked = True
+                    if self.process is not None and self.process.poll() is not None:
+                        self.alive = False
+                        raise ProviderDeadError(
+                            "subprocess died during recv (soft check)"
+                        )
+                continue
+            if isinstance(item, Exception):
+                raise ProviderDeadError(f"stdout read error: {item}") from item
+            return item
+
     def recv(self) -> Iterator[dict[str, Any]]:
+<<<<<<< HEAD
         if not self.alive or self.process is None:
+=======
+        if not self.alive or self.process is None or self._stdout_q is None:
+>>>>>>> upstream/main
             raise ProviderDeadError("subprocess not alive")
+        # Reset per-turn output-cap state at the start of every send->result
+        # cycle so the counter measures ONLY this turn's newly produced output.
+        self.turn_output_capped = False
+        self._turn_output_by_request = {}
         saw_result = False
         while True:
+<<<<<<< HEAD
             ev = self._event_queue.get()
             if ev is None:
                 # EOF sentinel: re-enqueue so subsequent recv() callers also
                 # get it immediately rather than blocking forever.
                 self._event_queue.put(None)
                 break
+=======
+            item = self._next_line()
+            if item is _STDOUT_EOF:
+                break
+            line = item.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError as e:
+                log.warning("skip non-json line: %s (%s)", line[:120], e)
+                continue
+>>>>>>> upstream/main
             t = ev.get("type")
             if t == "system" and ev.get("subtype") == "init":
                 sid = ev.get("session_id")
@@ -310,8 +447,84 @@ class ClaudeCodeProvider(Provider):
                 with self._turn_lock:
                     self._complete_turns = max(0, self._complete_turns - 1)
                 break
+            # Output-cap brake: after yielding the event, tally this turn's
+            # newly produced output tokens and interrupt if it exceeds the cap.
+            # Done post-yield so the loop still gets the breaching event.
+            # Subagent (Task-dispatched) events carry parent_tool_use_id and
+            # are excluded — see _turn_output_breached.
+            if t == "assistant" and self._turn_output_breached(ev):
+                self.turn_output_capped = True
+                log.warning(
+                    "turn output cap %d exceeded (%d) — interrupting turn",
+                    self.turn_output_cap,
+                    sum(self._turn_output_by_request.values()),
+                )
+                self.cancel()
+                return
+        # A cap-interrupted turn returns cleanly above; any other missing
+        # result is a genuine mid-turn death.
         if not saw_result:
             raise ProviderDeadError("subprocess died during recv")
+
+    def _turn_output_breached(self, ev: dict[str, Any]) -> bool:
+        """Accumulate this turn's OUTPUT tokens and report a cap breach.
+
+        Counts ONLY usage.output_tokens (never input/cache_* — those reflect
+        window size, easily 100k+, and would false-trigger every turn).
+        Subagent output is excluded: a Task-dispatched subagent's assistant
+        events are interleaved into the SAME stream but carry a top-level
+        `parent_tool_use_id` (the dispatching tool_use id) instead of None —
+        verified empirically against a real stream-json transcript (2.1.197,
+        `claude --output-format stream-json` dispatching a Task). Counting
+        those would false-trigger the cap on ordinary agent-dispatch turns.
+
+        A turn spans several API requests (one per tool round trip); the
+        stream also repeats identical usage lines within a request. Dedup by
+        top-level `request_id` (snake_case — also verified on the same
+        transcript; NOT `requestId`): keep the MAX output_tokens seen per
+        request_id, then sum across requests. Returns True once the sum
+        exceeds turn_output_cap.
+        """
+        cap = self.turn_output_cap
+        if cap is None or cap <= 0:
+            return False
+        if ev.get("parent_tool_use_id") is not None:
+            return False
+        usage = (ev.get("message") or {}).get("usage") or {}
+        out = usage.get("output_tokens")
+        if not isinstance(out, int):
+            return False
+        # Events without a request_id (synthetic/test) each count once under a
+        # unique key so they still sum rather than clobber one another.
+        req_id = ev.get("request_id")
+        key = req_id if isinstance(req_id, str) and req_id else f"_noid_{id(ev)}"
+        prev = self._turn_output_by_request.get(key, 0)
+        if out > prev:
+            self._turn_output_by_request[key] = out
+        return sum(self._turn_output_by_request.values()) > cap
+
+    def _kill_process_group(self) -> None:
+        """SIGKILL the whole process group (spawned with start_new_session).
+
+        Used on hard stall: the subprocess is alive but wedged, so a plain
+        terminate() may not reap child tool processes. Mirrors the intent of
+        cancel()/close() but guarantees the group dies immediately.
+        """
+        self.alive = False
+        p = self.process
+        if p is None:
+            return
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                p.kill()
+            except Exception:
+                pass
+        try:
+            p.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
 
     def send_control_response(
         self, request_id: str, behavior: str, payload: dict[str, Any]
