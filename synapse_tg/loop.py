@@ -29,12 +29,8 @@ from synapse_core.marrow_session import get_session_created_at, get_session_effo
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
-<<<<<<< HEAD
-from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT
+from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT
 from synapse_core.providers.codex import CodexProvider, is_codex_model
-=======
-from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT
->>>>>>> upstream/main
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.state import BridgeState
 
@@ -143,7 +139,7 @@ class TgLoop:
         self._sessions = sessions
         self._record_session = record_session
         self._idle_loop = idle_loop
-<<<<<<< HEAD
+        self._alerts = alerts
         self._qidu_signal: QiduSignalPoller | None = None
         if cfg.qidu_api_base and cfg.qidu_token:
             self._qidu_signal = QiduSignalPoller(
@@ -161,9 +157,6 @@ class TgLoop:
                 notebook_dir=cfg.qidu_notebook_dir,
                 alerts=alerts,
             )
-=======
-        self._alerts = alerts
->>>>>>> upstream/main
         self._provider: ClaudeCodeProvider | None = None
         self._lock = asyncio.Lock()
         self._death_count = 0
@@ -325,14 +318,10 @@ class TgLoop:
             marrow_bridge=cfg.marrow_bridge,
             effort_level=state.effort_level,
             stderr_log=Path.home() / "Library/Logs/synapse-tg-cc-stderr.log",
-<<<<<<< HEAD
-            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT],
-=======
-            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, NIGHT_SYSTEM_PROMPT],
+            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT],
             idle_soft_s=cfg.idle_soft_s,
             idle_hard_s=cfg.idle_hard_s,
             turn_output_cap=cfg.turn_output_cap,
->>>>>>> upstream/main
         )
 
     def ensure_provider(self) -> None:
@@ -1048,44 +1037,6 @@ class TgLoop:
 
         async with self._lock:
             try:
-<<<<<<< HEAD
-                self.ensure_provider()
-                assert self._provider is not None
-                typing.start()
-                await asyncio.to_thread(self._provider.send, body)
-                response, thinking, stream_msg_id = await self._stream_response(bot, chat_id, typing)
-                if self._provider and self._provider.session_id:
-                    if self._state.session_id != self._provider.session_id:
-                        self._state.session_id = self._provider.session_id
-                        self._persist_state()
-                # B6: stamp the cross-channel last-active pointer (parity with
-                # wx). Injected turns (heartbeat etc.) don't count as her
-                # activity — only stamp when the turn carries real inbound.
-                if self._state.session_id and not body.startswith("[system:"):
-                    try:
-                        last_active.write(
-                            self._LAST_ACTIVE_PATH,
-                            self._state.session_id,
-                            "tg",
-                            time.time(),
-                        )
-                    except Exception as e:
-                        logger.warning("last_active write failed: %s", e)
-            except ProviderDeadError as e:
-                if self._user_initiated_close:
-                    self._user_initiated_close = False
-                    return
-                logger.error("provider error: %s", e)
-                self._respawn()
-                if self._death_count >= _MAX_CONSECUTIVE_DEATHS:
-                    logger.error("provider gave up after %d consecutive deaths", self._death_count)
-                    self._provider = None
-                    await self._send_provider_notice(bot, chat_id, "provider.gave_up")
-                    return
-                self._buffer.prepend(body)
-                await self._send_provider_notice(bot, chat_id, "provider.restarting")
-                return
-=======
                 # Retry-once: on a mid-turn stall/death, respawn resuming the
                 # same sid and re-send the SAME body ONCE. Second failure ->
                 # user-facing notice. Bridges emit outbound only from completed
@@ -1104,6 +1055,20 @@ class TgLoop:
                             if self._state.session_id != self._provider.session_id:
                                 self._state.session_id = self._provider.session_id
                                 self._persist_state()
+                        # B6: stamp the cross-channel last-active pointer
+                        # (parity with wx). Injected turns (heartbeat etc.)
+                        # don't count as her activity — only stamp when the
+                        # turn carries real inbound.
+                        if self._state.session_id and not body.startswith("[system:"):
+                            try:
+                                last_active.write(
+                                    self._LAST_ACTIVE_PATH,
+                                    self._state.session_id,
+                                    "tg",
+                                    time.time(),
+                                )
+                            except Exception as e:
+                                logger.warning("last_active write failed: %s", e)
                         break
                     except ProviderDeadError as e:
                         if self._user_initiated_close:
@@ -1124,7 +1089,6 @@ class TgLoop:
                         self._buffer.prepend(body)
                         await self._send_provider_notice(bot, chat_id, "provider.restarting")
                         return
->>>>>>> upstream/main
             except Exception as e:
                 logger.error("unexpected error: %s", e)
                 await bot.send_message(chat_id=chat_id, text=messages.t("bridge.error", self._state.voice_style))

@@ -4,10 +4,7 @@ import json
 import logging
 import os
 import queue
-<<<<<<< HEAD
-=======
 import signal
->>>>>>> upstream/main
 import subprocess
 import threading
 import time
@@ -65,25 +62,6 @@ _DEFAULT_IDLE_HARD_S = 300.0
 # tokens for the current turn — never input/cache figures (those reflect
 # window size and would false-trigger every turn).
 _DEFAULT_TURN_OUTPUT_CAP = 20000
-
-# Sentinel objects for the stdout reader queue: EOF = clean stream end,
-# an Exception instance = a read error surfaced to recv().
-_STDOUT_EOF = object()
-
-
-def _read_stdout_to_queue(stdout_pipe, q: "queue.Queue") -> None:
-    """Daemon thread: push each raw stdout line onto q; _STDOUT_EOF on EOF.
-
-    Lets recv() apply a timed get() so a wedged-but-alive subprocess (no
-    output, process still running) is detected instead of blocking forever.
-    """
-    try:
-        for line in stdout_pipe:
-            q.put(line)
-    except Exception as exc:  # pragma: no cover - defensive
-        q.put(exc)
-    finally:
-        q.put(_STDOUT_EOF)
 
 # E-polish outbound quote v3: teach cc the bridge-specific <quote> protocol.
 # Injected once per session via --append-system-prompt so cc emits the tag
@@ -186,12 +164,10 @@ class ClaudeCodeProvider(Provider):
         self.alive: bool = False
         self.session_id: str | None = None
         self.usage_total: dict[str, int] = {}
-<<<<<<< HEAD
         # Resident reader thread infrastructure (populated in spawn()).
         self._event_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._complete_turns: int = 0
         self._turn_lock = threading.Lock()
-=======
         # Per-turn output cap state (reset at the start of every recv()).
         # turn_output_capped: sticky flag the loop layer reads after the turn
         # to send a "interrupted by the token cap" notice. NO retry on breach.
@@ -200,10 +176,6 @@ class ClaudeCodeProvider(Provider):
         # values. Main-line only — subagent-attributed events are excluded.
         self.turn_output_capped: bool = False
         self._turn_output_by_request: dict[str, int] = {}
-        # Populated in spawn(): stdout reader thread + its handoff queue.
-        self._stdout_q: queue.Queue | None = None
-        self._reader_thread: threading.Thread | None = None
->>>>>>> upstream/main
 
     def _build_cmd(self) -> list[str]:
         cmd = [
@@ -266,23 +238,12 @@ class ClaudeCodeProvider(Provider):
         except OSError as e:
             raise ProviderSpawnError(f"claude spawn failed: {e}") from e
         self.alive = True
-<<<<<<< HEAD
         # Reset buffered-turn state on each spawn so a re-spawned provider
-        # starts with an empty queue and zero counter.
+        # starts with an empty queue and zero counter. The resident reader
+        # (started below) is the sole stdout consumer; recv() times its
+        # queue gets to measure continuous silence for the idle policy.
         self._event_queue = queue.Queue()
         self._complete_turns = 0
-=======
-        # Non-blocking stdout consumption: a daemon reader pushes lines onto a
-        # queue so recv() can time each get() and measure continuous silence.
-        self._stdout_q = queue.Queue()
-        self._reader_thread = threading.Thread(
-            target=_read_stdout_to_queue,
-            args=(self.process.stdout, self._stdout_q),
-            name="cc-stdout-reader",
-            daemon=True,
-        )
-        self._reader_thread.start()
->>>>>>> upstream/main
         if self.stderr_log is not None:
             t = threading.Thread(
                 target=_drain_stderr,
@@ -357,17 +318,17 @@ class ClaudeCodeProvider(Provider):
         """
         self.send(text)
 
-    def _next_line(self) -> Any:
-        """Block for the next stdout line, enforcing the idle liveness policy.
+    def _next_event(self) -> dict[str, Any] | None:
+        """Block for the next parsed event, enforcing the idle liveness policy.
 
         Measures CONTINUOUS silence: the deadline is reset by the caller each
-        time a line arrives (a fresh _next_line call starts a new clock).
+        time an event arrives (a fresh _next_event call starts a new clock).
         - At idle_soft_s of silence: poll the subprocess. Dead -> ProviderDead;
           alive -> keep waiting (self-heal window for a slow tool call).
         - At idle_hard_s of silence: process-group kill, raise ProviderStall.
-        Returns the raw line, or _STDOUT_EOF on clean stream end.
+        Returns the parsed event dict, or the None EOF sentinel put by the
+        resident reader on clean stream end.
         """
-        assert self._stdout_q is not None
         start = time.monotonic()
         soft_checked = False
         while True:
@@ -383,7 +344,7 @@ class ClaudeCodeProvider(Provider):
             else:
                 wait = self.idle_hard_s - elapsed
             try:
-                item = self._stdout_q.get(timeout=max(0.0, wait))
+                return self._event_queue.get(timeout=max(0.0, wait))
             except queue.Empty:
                 if not soft_checked:
                     soft_checked = True
@@ -393,16 +354,9 @@ class ClaudeCodeProvider(Provider):
                             "subprocess died during recv (soft check)"
                         )
                 continue
-            if isinstance(item, Exception):
-                raise ProviderDeadError(f"stdout read error: {item}") from item
-            return item
 
     def recv(self) -> Iterator[dict[str, Any]]:
-<<<<<<< HEAD
         if not self.alive or self.process is None:
-=======
-        if not self.alive or self.process is None or self._stdout_q is None:
->>>>>>> upstream/main
             raise ProviderDeadError("subprocess not alive")
         # Reset per-turn output-cap state at the start of every send->result
         # cycle so the counter measures ONLY this turn's newly produced output.
@@ -410,26 +364,12 @@ class ClaudeCodeProvider(Provider):
         self._turn_output_by_request = {}
         saw_result = False
         while True:
-<<<<<<< HEAD
-            ev = self._event_queue.get()
+            ev = self._next_event()
             if ev is None:
                 # EOF sentinel: re-enqueue so subsequent recv() callers also
                 # get it immediately rather than blocking forever.
                 self._event_queue.put(None)
                 break
-=======
-            item = self._next_line()
-            if item is _STDOUT_EOF:
-                break
-            line = item.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError as e:
-                log.warning("skip non-json line: %s (%s)", line[:120], e)
-                continue
->>>>>>> upstream/main
             t = ev.get("type")
             if t == "system" and ev.get("subtype") == "init":
                 sid = ev.get("session_id")

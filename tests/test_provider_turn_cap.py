@@ -193,20 +193,22 @@ def test_mainline_output_still_triggers_alongside_subagent_traffic():
 
 
 def _rescript(p, fake, lines: list[str]) -> None:
-    """Point the provider at a fresh scripted stdout stream + reader thread,
-    as if a new turn's stream had begun."""
+    """Feed a fresh scripted turn into the provider's event queue, as if the
+    resident reader had consumed a new turn's stream. Drains leftovers first
+    (incl. the EOF sentinel from the exhausted first scripted stream)."""
     import queue as _queue
-    import threading as _threading
 
-    from synapse_core.providers.cc import _read_stdout_to_queue
-
-    fake.stdout = iter(lines)
-    p._stdout_q = _queue.Queue()
-    t = _threading.Thread(
-        target=_read_stdout_to_queue, args=(fake.stdout, p._stdout_q), daemon=True
-    )
-    t.start()
-    t.join(timeout=1.0)  # scripted lines are instant; ensure they're queued
+    try:
+        while True:
+            p._event_queue.get_nowait()
+    except _queue.Empty:
+        pass
+    for ln in lines:
+        ev = json.loads(ln)
+        if ev.get("type") == "result":
+            with p._turn_lock:
+                p._complete_turns += 1
+        p._event_queue.put(ev)
 
 
 def test_counter_resets_each_turn():

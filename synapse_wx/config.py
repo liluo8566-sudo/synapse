@@ -33,9 +33,7 @@ class Config:
     target_wxid: str = ""
     marrow_repo_cmd: str = ""
     cc_cwd: str = ""  # cwd cc subprocess spawns in; empty = $HOME
-<<<<<<< HEAD
     user_name: str = ""  # [persona] display name for injected signal text
-=======
     # Provider liveness: seconds of continuous stream silence before the soft
     # liveness check (poll process) and the hard idle kill (stall -> respawn).
     idle_soft_s: float = 60.0
@@ -43,7 +41,6 @@ class Config:
     # Per-turn OUTPUT token brake: interrupt a runaway turn instead of burning
     # quota. 0 or negative disables.
     turn_output_cap: int = 20000
->>>>>>> upstream/main
     # B1 sessions table. Empty = bridge runs without marrow session persistence
     # (no row written, /resume falls back to jsonl grep). Format strings get
     # {sid}, {model}, {channel} substituted.
@@ -153,13 +150,11 @@ def load_config(path: Path | None = None) -> Config:
         val = debug["raw_poll_log_until"]
         if isinstance(val, str):
             cfg.raw_poll_log_until = val
-<<<<<<< HEAD
     persona = data.get("persona") or {}
     if isinstance(persona, dict) and "user_name" in persona:
         val = persona["user_name"]
         if isinstance(val, str):
             cfg.user_name = val
-=======
     outbox = data.get("outbox") or {}
     if isinstance(outbox, dict):
         pi = outbox.get("poll_interval_s")
@@ -195,7 +190,6 @@ def load_config(path: Path | None = None) -> Config:
     core = data.get("core") or {}
     if isinstance(core, dict) and isinstance(core.get("timezone"), str):
         cfg.timezone = core["timezone"]
->>>>>>> upstream/main
     provider = data.get("provider") or {}
     if isinstance(provider, dict) and "cc_cwd" in provider:
         val = provider["cc_cwd"]

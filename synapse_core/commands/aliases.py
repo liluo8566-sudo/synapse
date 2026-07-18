@@ -12,16 +12,11 @@ MODEL_ALIASES: dict[str, str] = {
     "4.8": "claude-opus-4-8[1m]",
     "5": "claude-fable-5[1m]",
     "opus": "claude-opus-4-8[1m]",
-<<<<<<< HEAD
-    "sonnet": "claude-sonnet-4-6",
-    "haiku": "claude-haiku-4-5-20251001",
-    "fable": "claude-fable-5[1m]",
-    "codex": "codex",
-=======
     "sonnet": "sonnet",
     "haiku": "haiku",
-    "fable": "claude-fable-5",
->>>>>>> upstream/main
+    # fable keeps the [1m] pin so "5" and "fable" resolve identically.
+    "fable": "claude-fable-5[1m]",
+    "codex": "codex",
 }
 
 # Aliases safe for bare-text natural matching (no slash prefix).

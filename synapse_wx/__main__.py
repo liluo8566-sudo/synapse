@@ -28,17 +28,14 @@ from .ilink import ILinkClient
 from .ilink.rawlog import RawPollLogger
 from .ilink.retry import DEFAULT_RETRYABLE, with_retry
 from .loop import MainLoop
-<<<<<<< HEAD
 from synapse_core.providers.cc import (
     MEDIA_SYSTEM_PROMPT,
+    NIGHT_SYSTEM_PROMPT,
     QUOTE_SYSTEM_PROMPT,
     WX_ICLOUD_PROMPT,
     ClaudeCodeProvider,
 )
 from synapse_core.providers.codex import CodexProvider, is_codex_model
-=======
-from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT, WX_ICLOUD_PROMPT
->>>>>>> upstream/main
 from synapse_core.sessionend.idle import IdleFireLoop
 from synapse_core.sessionend.tracker import SessionTracker
 from .sleep import SleepWakeObserver
@@ -236,17 +233,14 @@ def main() -> int:
             cwd=state.cc_cwd,
             effort_level=state.effort_level,
             stderr_log=CC_STDERR_LOG,
-<<<<<<< HEAD
             system_prompts=[
                 QUOTE_SYSTEM_PROMPT,
                 MEDIA_SYSTEM_PROMPT,
                 WX_ICLOUD_PROMPT,
                 WX_STICKER_PROMPT,
                 WX_BUBBLE_FORMAT_PROMPT,
+                NIGHT_SYSTEM_PROMPT,
             ],
-=======
-            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, WX_ICLOUD_PROMPT, WX_STICKER_PROMPT, WX_BUBBLE_FORMAT_PROMPT, NIGHT_SYSTEM_PROMPT],
->>>>>>> upstream/main
             marrow_bridge=True,
             channel=CHANNEL,
             idle_soft_s=cfg.idle_soft_s,
