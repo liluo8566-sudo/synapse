@@ -73,7 +73,6 @@ def _make_registry() -> tuple[Registry, BridgeState]:
         swap_provider=lambda m, sid: None,
         close_provider=lambda: None,
         forget_session=lambda: None,
-        fire_sessionend=lambda sid: None,
     )
     return Registry(ctx), s
 

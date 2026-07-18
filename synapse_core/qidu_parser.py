@@ -43,6 +43,7 @@ class QiduParser:
         poll_interval: float = 10.0,
         extract_script: str = "~/workshop/qidu/local/extract_book.py",
         alerts: Any = None,
+        lock_path: str = _LOCK_PATH,
     ) -> None:
         self._api_base = api_base.rstrip("/")
         self._token = token
@@ -51,6 +52,7 @@ class QiduParser:
         self._poll_interval = poll_interval
         self._extract_script = extract_script
         self._alerts = alerts
+        self._lock_path = lock_path
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -101,7 +103,7 @@ class QiduParser:
 
     def _try_acquire_lock(self) -> bool:
         try:
-            fd = os.open(_LOCK_PATH, os.O_CREAT | os.O_WRONLY, 0o600)
+            fd = os.open(self._lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._lock_fd = fd
             return True

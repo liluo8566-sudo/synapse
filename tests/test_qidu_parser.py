@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from synapse_core.qidu_parser import QiduParser, _LOCK_PATH, _MAX_FAILURES, _RAPID_FAIL_THRESHOLD
+from synapse_core.qidu_parser import QiduParser, _MAX_FAILURES, _RAPID_FAIL_THRESHOLD
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -257,28 +257,25 @@ def test_rapid_failures_enter_quota_mode():
 
 # ── flock mutual exclusion ─────────────────────────────────────────────────────
 
-def test_flock_only_one_polls():
-    """Two parsers: first acquires lock, second cannot."""
-    p1 = make_parser()
-    p2 = make_parser()
+def test_flock_only_one_polls(tmp_path):
+    """Two parsers: first acquires lock, second cannot. Isolated lock path so
+    a live bridge holding the real /tmp lock never interferes."""
+    lock = str(tmp_path / "qidu-parser.lock")
+    p1 = make_parser(lock_path=lock)
+    p2 = make_parser(lock_path=lock)
 
     assert p1._try_acquire_lock() is True
     try:
-        result = p2._try_acquire_lock()
-        assert result is False
+        assert p2._try_acquire_lock() is False
     finally:
         p1._release_lock()
-        # clean up lock file
-        try:
-            os.remove(_LOCK_PATH)
-        except FileNotFoundError:
-            pass
 
 
-def test_flock_released_allows_second():
+def test_flock_released_allows_second(tmp_path):
     """After first releases, second can acquire."""
-    p1 = make_parser()
-    p2 = make_parser()
+    lock = str(tmp_path / "qidu-parser.lock")
+    p1 = make_parser(lock_path=lock)
+    p2 = make_parser(lock_path=lock)
 
     assert p1._try_acquire_lock() is True
     p1._release_lock()
@@ -287,10 +284,6 @@ def test_flock_released_allows_second():
         assert p2._try_acquire_lock() is True
     finally:
         p2._release_lock()
-        try:
-            os.remove(_LOCK_PATH)
-        except FileNotFoundError:
-            pass
 
 
 # ── idempotent (already active) ────────────────────────────────────────────────

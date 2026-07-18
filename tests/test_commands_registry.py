@@ -147,7 +147,7 @@ def test_model_alias_switch() -> None:
     reg, hooks, _ = _make(s)
     verdict, reply = reg.dispatch("/model 4.7")
     assert verdict == "handled"
-    assert reply == "🐺换脑子了...Opus 4.7 [1M]上线 (˶ᵔ ᵕ ᵔ˶)"
+    assert reply == "🤖(Opus 4.7 [1M])上线中..."
     assert hooks.swap_calls == [("claude-opus-4-7[1m]", "sid-abc")]
     assert s.model == "claude-opus-4-7[1m]"
 
@@ -176,7 +176,7 @@ def test_model_raw_canonical_id_passes_through() -> None:
     verdict, reply = reg.dispatch("/model claude-future-9")
     assert verdict == "handled"
     # display fallback uses the id itself.
-    assert reply == "🐺换脑子了...claude-future-9上线 (˶ᵔ ᵕ ᵔ˶)"
+    assert reply == "🤖(claude-future-9)上线中..."
     assert hooks.swap_calls == [("claude-future-9", None)]
 
 
@@ -205,7 +205,7 @@ def test_natural_alias_routes_as_model() -> None:
     reg, hooks, _ = _make(s)
     verdict, reply = reg.dispatch("4.7")
     assert verdict == "handled"
-    assert reply == "🐺换脑子了...Opus 4.7 [1M]上线 (˶ᵔ ᵕ ᵔ˶)"
+    assert reply == "🤖(Opus 4.7 [1M])上线中..."
     assert hooks.swap_calls == [("claude-opus-4-7[1m]", "sid-xyz")]
     assert s.model == "claude-opus-4-7[1m]"
 
@@ -227,7 +227,7 @@ def test_clear_resets_session() -> None:
     verdict, reply = reg.dispatch("/clear")
     assert verdict == "handled"
     # B1: /clear lands on the configured default (opus-4.6[1m]).
-    assert (reply or "").startswith("🐺🦦新窝开张")
+    assert (reply or "").startswith("新鸭上桌")
     assert "Opus 4.6 [1M]" in (reply or "")
     assert hooks.swap_calls == [("claude-opus-4-6[1m]", None)]
     assert hooks.forget_calls == 1
@@ -240,7 +240,7 @@ def test_new_is_alias_for_clear() -> None:
     reg, hooks, _ = _make(s)
     verdict, reply = reg.dispatch("/new")
     assert verdict == "handled"
-    assert (reply or "").startswith("🐺🦦新窝开张")
+    assert (reply or "").startswith("新鸭上桌")
     assert hooks.swap_calls == [("claude-opus-4-6[1m]", None)]
     assert s.session_id is None
 

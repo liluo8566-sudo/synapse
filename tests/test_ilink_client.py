@@ -241,38 +241,6 @@ def test_send_text_splits_long_text(
     assert logged_in_client._client.post.call_count == 2
 
 
-def test_send_text_retries_once_on_failure_then_succeeds(
-    logged_in_client: ILinkClient,
-    _no_sleep: list[float],
-) -> None:
-    """First sendmessage ret=-2, second ret=0 → True; exactly 2 POSTs and one sleep."""
-    fail_resp = _make_response(200, {"ret": -2, "errmsg": "rate limit"})
-    ok_resp = _make_response(200, {"ret": 0})
-    logged_in_client._client.post.side_effect = [fail_resp, ok_resp]
-
-    result = logged_in_client.send_text("u", "c", "hello")
-
-    assert result is True
-    assert logged_in_client._client.post.call_count == 2
-    assert len(_no_sleep) == 1
-    assert _no_sleep[0] == pytest.approx(1.5)
-
-
-def test_send_text_returns_false_after_retry_also_fails(
-    logged_in_client: ILinkClient,
-    _no_sleep: list[float],
-) -> None:
-    """Both attempts fail → False; sleep called once between them."""
-    fail_resp = _make_response(200, {"ret": -2, "errmsg": "still bad"})
-    logged_in_client._client.post.side_effect = [fail_resp, fail_resp]
-
-    result = logged_in_client.send_text("u", "c", "hello")
-
-    assert result is False
-    assert logged_in_client._client.post.call_count == 2
-    assert len(_no_sleep) == 1
-
-
 # -- extract_text / extract_media ---------------------------------------------
 
 

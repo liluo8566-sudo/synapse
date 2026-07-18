@@ -34,10 +34,10 @@ class BridgeState:
     # stripped from the reply text regardless so the user never sees raw XML.
     quote_on: bool = False
     # /effort low|medium|high|xhigh|max|ultracode|auto → cc `--effort <level>`
-    # on the next provider swap. Default "max" per 霜霜's 2026-07-08 request.
-    # The persisted bridge state file overlays whatever the last session was
-    # using.
-    effort_level: str = "max"
+    # on the next provider swap. The persisted bridge state file overlays
+    # whatever the last session was using, so a running deployment keeps its
+    # chosen level across upgrades.
+    effort_level: str = "high"
     # /voice cn|en — swaps the ack-string style. "cn" = 中文搞笑, "en" =
     # English short. Default cn matches Lumi's daily use. Persisted; survives
     # bridge crash. See commands.messages for the lookup table.

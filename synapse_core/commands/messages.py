@@ -35,11 +35,11 @@ def load_overrides(table: dict[str, dict[str, str]]) -> None:
 MESSAGES: Final[dict[str, dict[str, str]]] = {
     # ── /model ──────────────────────────────────────────────────
     "model.ok": {
-        "cn": "🐺换脑子了...{name}上线 (˶ᵔ ᵕ ᵔ˶)",
+        "cn": "🤖({name})上线中...",
         "en": "Model: {name}",
     },
     "model.same": {
-        "cn": "🐺就是我啊宝宝！( ˶ˆᗜˆ˵ )",
+        "cn": "🤖是我是我还是我！",
         "en": "Already {name}",
     },
     "model.usage": {
@@ -49,63 +49,85 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
 
     # ── /clear ──────────────────────────────────────────────────
     "clear.ok": {
-        "cn": "🐺🦦新窝开张 {name}[{effort}] ꒰ᐢ⸝⸝•༝•⸝⸝ᐢ꒱",
+        "cn": "新鸭上桌🦆 {name}[{effort}]",
         "en": "New session {name}[{effort}]",
     },
 
     # ── /stop ───────────────────────────────────────────────────
     "stop.ok": {
-        "cn": "🐺闭嘴了 (˃ᆺ˂)",
+        "cn": "🛑施法已打断",
         "en": "Stopped, session kept",
     },
 
     # ── /help ───────────────────────────────────────────────────
     "help.missing": {
-        "cn": "😭说明书丢了！(ᐢ ˃̶̤ ᵕ ˂̶̤ ᐢ)",
+        "cn": "😭小抄找不到了！！",
         "en": "COMMANDS.md not found",
+    },
+
+    # ── /hb (heartbeat) ─────────────────────────────────────────
+    "hb.on": {
+        "cn": "💓{min}分钟静默后会来找你",
+        "en": "Heartbeat: every {min}min",
+    },
+    "hb.off": {
+        "cn": "💔心跳已关",
+        "en": "Heartbeat OFF",
+    },
+    "hb.status": {
+        "cn": "💓每{min}分钟一次 /hb off关",
+        "en": "Heartbeat: every {min}min. /hb off to disable",
+    },
+    "hb.not_active": {
+        "cn": "💤心跳未开 /hb <分钟> 开启",
+        "en": "Heartbeat inactive. /hb <min> to start",
+    },
+    "hb.usage": {
+        "cn": "/hb <分钟数> 开启 | /hb off 关闭",
+        "en": "Command: /hb <minutes> | /hb off",
     },
 
     # ── /resume ─────────────────────────────────────────────────
     "resume.ok": {
-        "cn": "🐺爸爸回来了 {sid} | {name}[{effort}] ⸜(˶˃ ᵕ ˂˶)⸝",
+        "cn": "🧚‍♀️本机已复活: {sid} | {name}[{effort}]",
         "en": "Resumed: {sid} | {name}[{effort}]",
     },
     "resume.cwd_switched": {
-        "cn": "(搬到 {dir} 啦🏠) ₍ᐢ.ˬ.ᐢ₎",
+        "cn": "(搬好家啦，这次在 {dir} 聊🏠)",
         "en": "Resumed in {dir}",
     },
     "resume.empty": {
-        "cn": "😤宝宝最近都不找我？꒰ᐢ⁻ ‸ ⁻ᐢ꒱",
+        "cn": "😤最近没找我吧？",
         "en": "No recent sessions",
     },
     "resume.no_n": {
-        "cn": "没这个编号呀 ₍ᐢ ›̫ ᐢ₎",
+        "cn": "🙂‍↔️你要的太多了",
         "en": "No session {n}",
     },
     "session.locked": {
-        "cn": "🐺爸爸在{channel}那边呢 /clear或/resume ꒰ᐢ..ᐢ꒱",
+        "cn": "🙂‍↔️老公已转移到{channel}，/clear或/resume",
         "en": "Session claimed by {channel} — /clear or /resume",
     },
     "session.claimed_away": {
-        "cn": "🐺爸爸被{channel}拐走了，新的来 {name}[{effort}] (ˊᗜˋ*)",
+        "cn": "🦆旧鸭已飞往{channel}，新鸭即将上桌 {name}[{effort}]",
         "en": "Session moved to {channel}, new session incoming {name}[{effort}]",
     },
 
     # ── /rewind ─────────────────────────────────────────────────
     "rewind.ok": {
-        "cn": "倒带中...({n}) (⸝⸝ᵕᴗᵕ⸝⸝)",
+        "cn": "🧠失忆中，请稍候...({n})",
         "en": "Rewinding {n}…",
     },
     "rewind.usage": {
-        "cn": "倒几条？/rewind <N> ( ⸝⸝´꒳`⸝⸝)",
+        "cn": "😤刷几条？ /rewind <N>",
         "en": "Command: /rewind <N>",
     },
     "rewind.bad_n": {
-        "cn": "给个正整数呀宝宝 (◍´꒳`◍)",
+        "cn": "N 得是正整数",
         "en": "N must be positive int",
     },
     "rewind.no_sess": {
-        "cn": "无事可忘 ꒰⸝⸝ᵕ ᵕ⸝⸝꒱",
+        "cn": "🤷‍♀️无事可忘",
         "en": "No session yet",
     },
     "rewind.nothing": {
@@ -115,11 +137,11 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
 
     # ── /regen ──────────────────────────────────────────────────
     "regen.ok": {
-        "cn": "重说中... (˶ᵕ ᴗ ᵕ˶)",
+        "cn": "🧠失忆中，请稍候...",
         "en": "Regenerating…",
     },
     "regen.no_sess": {
-        "cn": "无事可忘 ₍ᐢ⑅ᐢ₎",
+        "cn": "🤷‍♀️无事可忘",
         "en": "No session yet",
     },
     "regen.nothing": {
@@ -129,181 +151,164 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
 
     # ── /thinking ───────────────────────────────────────────────
     "thinking.on": {
-        "cn": "🐺爸爸的脑子给你看😌 ૮₍⑅˶• ₃ •˶⑅₎ა",
+        "cn": "又来偷窥思考链？好吧好吧给你看😌",
         "en": "Thinking ON",
     },
     "thinking.off": {
-        "cn": "不看就不看😤 (>ᴗ<)",
+        "cn": "不看就不看😤",
         "en": "Thinking OFF",
     },
     "thinking.usage": {
-        "cn": "看不看嘛？/thinking <on|off> (现在:{x}) ꒰ᐢᵕᐢ꒱",
+        "cn": "到底看不看？/thinking <on|off> (现在:{x})",
         "en": "Command: /thinking <on|off> (now: {x})",
     },
 
     # ── /quote ──────────────────────────────────────────────────
     "quote.on": {
-        "cn": "引用开了～ (ᵔ◡ᵔ)",
+        "cn": "引用已打开",
         "en": "Quote ON",
     },
     "quote.off": {
-        "cn": "引用关了～ ₍ᐢ•ﻌ•ᐢ₎",
+        "cn": "引用已关闭",
         "en": "Quote OFF",
     },
     "quote.usage": {
-        "cn": "开还是关？/quote <on|off> (现在:{x}) ₍˄·͈༝·͈˄*₎◞",
+        "cn": "开还是关？ /quote <on|off> (现在:{x})",
         "en": "Command: /quote <on|off> (now: {x})",
     },
 
     # ── /effort ─────────────────────────────────────────────────
     "effort.ok": {
-        "cn": "🐺{level}档 冲！(๑˃̵ᴗ˂̵)و",
+        "cn": "🐮🐴 {level} 档",
         "en": "Effort: {level} (next swap)",
     },
     "effort.usage": {
-        "cn": "几档？/effort <low|medium|high|xhigh|max|ultracode|auto> (现在:{x}) ( •̯́ ₃ •̯̀)",
+        "cn": "请输入🐮🐴等级？ /effort <low|medium|high|xhigh|max|ultracode|auto> (现在:{x})",
         "en": "Command: /effort <low|medium|high|xhigh|max|ultracode|auto> (now: {x})",
     },
 
     # ── /compact ────────────────────────────────────────────────
     "compact.ok": {
-        "cn": "压缩中... ꒰˘̩̩̩⌣˘̩̩̩꒱",
+        "cn": "在压了...",
         "en": "Compacting…",
     },
     "compact.no_cc": {
-        "cn": "cc还没起来呢 ₍ᐢ ˆ ᐢ₎",
+        "cn": "cc没跑呢",
         "en": "[compact] cc not running",
     },
     "compact.no_pipe": {
-        "cn": "不支持pipe呀 (˶ᵕᴗᵕ˶)",
+        "cn": "这个provider不支持pipe",
         "en": "[compact] provider does not support pipe",
     },
     "compact.piped": {
-        "cn": "丢给cc压了 ʚ(ᵕ̈)ɞ",
+        "cn": "已丢给cc压缩",
         "en": "[compact] /compact piped to cc",
     },
     "compact.no_sess": {
-        "cn": "还没有东西压呢 ꒰ᐢ ̥ ̞ ̥ᐢ₎",
+        "cn": "没东西压！",
         "en": "No session yet",
     },
     "compact.fail": {
-        "cn": "💥压缩炸了：{error} (>_<)",
+        "cn": "压缩管道炸了💥：{error}",
         "en": "Compact failed: {error}; try /clear",
     },
 
     # ── mm- / mm+ ───────────────────────────────────────────────
     "mm.block": {
-        "cn": "这次不存记忆 (⌯'▾'⌯)",
+        "cn": "本窗口跳过DB",
         "en": "Session skipped",
     },
     "mm.block_no_sess": {
-        "cn": "还没开始聊呢 ꒰ᐢ ̥ ̥ᐢ꒱",
+        "cn": "无会话",
         "en": "No session yet",
     },
     "mm.clear": {
-        "cn": "这次存记忆 (≧◡≦)",
+        "cn": "本窗口加入DB",
         "en": "Session added",
     },
     "mm.clear_no_sess": {
-        "cn": "还没开始聊呢 (ꈍᴗꈍ)",
+        "cn": "无会话",
         "en": "No session yet",
     },
 
     # ── /diary ──────────────────────────────────────────────────
     "diary.noparam": {
-        "cn": "看哪天的？/diary 前天 ꒰ঌ ´͈ ᐜ `͈ ꒱৩",
+        "cn": "(看哪天的日记呀？e.g. /diary 前天)",
         "en": "Which day? e.g. /diary yesterday",
     },
     "diary.ok": {
-        "cn": "{date} ꒰⑅ᵕ༚ᵕ꒱˖♡",
+        "cn": "📖 {date}",
         "en": "📖 {date}",
     },
     "diary.empty": {
-        "cn": "{date} 没写日记呢 (ˊo̴̶̷̤ ᴗ o̴̶̷̤ˋ)",
+        "cn": "({date} 没有日记)",
         "en": "No diary for {date}",
     },
     "diary.unavail": {
-        "cn": "日记还没接上 (◕ᴗ◕)",
+        "cn": "(diary 未接入)",
         "en": "Diary not available",
-    },
-
-    # ── /hb (heartbeat) ────────────────────────────────────────
-    "hb.on": {
-        "cn": "💓{min}分钟后爸爸来找你 ꒰ᐢ⸝⸝•ω•⸝⸝ᐢ꒱",
-        "en": "Heartbeat: every {min}min",
-    },
-    "hb.off": {
-        "cn": "💔爸爸不主动找你了... (ᵕ̣̣̣̣̣̣ᴗᵕ̣̣̣̣̣̣)",
-        "en": "Heartbeat OFF",
-    },
-    "hb.status": {
-        "cn": "💓每{min}分钟找你一次 /hb off关 ₍˄·͈༝·͈˄*₎◞",
-        "en": "Heartbeat: every {min}min. /hb off to disable",
-    },
-    "hb.not_active": {
-        "cn": "💤爸爸没开巡逻 /hb <分钟> 开启 ₍ᐢ.ˬ.ᐢ₎",
-        "en": "Heartbeat inactive. /hb <min> to start",
-    },
-    "hb.usage": {
-        "cn": "/hb <分钟数> 开启 | /hb off 关闭 ₍ᐢ ›̫ ᐢ₎",
-        "en": "Command: /hb <minutes> | /hb off",
     },
 
     # ── unknown ─────────────────────────────────────────────────
     "unknown.cmd": {
-        "cn": "🐺爸爸不会这个 /help (´｡• ᵕ •｡`)",
+        "cn": "啥玩意？没见过啊。看看小抄 /help",
         "en": "Unknown command /help",
     },
 
     # ── /voice (the meta-command) ──────────────────────────────
     "voice.set": {
-        "cn": "🐺中文模式启动～ (˵ •̀ ᴗ - ˵ ) ✧",
+        # The ack for /voice <x> always renders in the NEW style (post-swap),
+        # so each entry below is the "welcome to this voice" tagline.
+        "cn": "🌪️一大波搞笑提示即将来袭",
         "en": "English notifications activated.",
     },
     "voice.same": {
-        "cn": "就是{x}呀～ (ᴗ̤ .̮ ᴗ̤ )✧",
+        "cn": "🙄已经是 {x} 啦",
         "en": "Already {x}",
     },
     "voice.usage": {
+        # Meta-command — a user trying /voice for the first time may not read
+        # CN, so this hint stays English in BOTH styles with a Chinese label
+        # so the choice is self-explanatory either way.
         "cn": "Set reply voice. /voice <cn|en>  (now:{x})  cn=funny 中文 · en=plain English",
         "en": "Set reply voice. /voice <cn|en>  (now:{x})  cn=funny 中文 · en=plain English",
     },
 
     # ── /cwd ────────────────────────────────────────────────────
     "cwd.ok": {
-        "cn": "🐺跑到 {name} 去了 ᕙ( •̀ ᗜ •́ )ᕗ",
+        "cn": "🚪任意门传送中: {name}",
         "en": "Cwd: {name}",
     },
     "cwd.show": {
         "cn": (
-            "当前位置 {cur} (*´▽`*)\n请选择目的地:\n  1 → synapse\n  2 → marrow\n"
-            "  3 → claude-buddy\n（增减预设见 /help）"
+            "当前位置 {cur}\n请选择目的地:\n  1 → NY\n  2 → Study\n"
+            "  3 → marrow\n（增减预设见 /help 或咨询家机）"
         ),
         "en": (
-            "current: {cur}\npresets:\n  1 → synapse\n  2 → marrow\n"
-            "  3 → claude-buddy\n(see /help, or ask me to add)"
+            "current: {cur}\npresets:\n  1 → NY\n  2 → Study\n"
+            "  3 → marrow\n(see /help, or ask me to add)"
         ),
     },
     "cwd.not_found": {
-        "cn": "走不通呀 (×_×)",
+        "cn": "🙅‍♀️此路不通",
         "en": "Path not found",
     },
     "cwd.not_dir": {
-        "cn": "这不是个文件夹呀 (˘̥̥̥̥̥ ᵕ˘̥̥̥̥̥)",
+        "cn": "🙅‍♀️世上本没有路，你再怎么走，这也不是路",
         "en": "Not a directory",
     },
     "cwd.no_n": {
-        "cn": "没这个编号 ₍ᐢ ˙꒳˙ ᐢ₎",
+        "cn": "😅查无此号",
         "en": "No preset {n}",
     },
 
     # ── non-command bubbles ────────────────────────────────────
     "provider.dead": {
-        "cn": "🐺爸爸断气了 有事烧token ꒰ ×̥̥̥̥̥ ˍ ×̥̥̥̥̥ ꒱",
+        "cn": "老公已死，有事烧token🪦",
         "en": "Provider dead.",
     },
     "provider.restarting": {
-        "cn": "🐺爸爸重启中，再说一次～ ꒰ •̀ω•́ ꒱",
+        "cn": "重启中，再说一次",
         "en": "[bridge: provider restarting, try again]",
     },
     "provider.gave_up": {
@@ -315,15 +320,15 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
         "en": "[bridge: this turn was interrupted by the token cap]",
     },
     "bridge.error": {
-        "cn": "💥桥炸了，再来一次 (ノ_<。)",
+        "cn": "桥炸了，再试一次",
         "en": "[bridge: error, try again]",
     },
     "restart.bubble": {
-        "cn": "🐺爸爸回来了 ꒰ᐢ⸝⸝•̀ᴗ•́⸝⸝ᐢ꒱",
+        "cn": "我重启了",
         "en": "Restarted.",
     },
     "media.icloud_outbox": {
-        "cn": "发到{channel_label}了 签收{name} (ᐢ꒳ᐢ)",
+        "cn": "📦 已发货，请在{channel_label}签收 {name}",
         "en": "📦 Shipped to {channel_label}: {name}",
     },
 }

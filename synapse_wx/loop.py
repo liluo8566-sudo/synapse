@@ -54,6 +54,12 @@ _QUOTE_TAG = re.compile(
     r"<quote>(.*?)</quote>\n?", re.DOTALL | re.IGNORECASE
 )
 _FAKE_QUOTE_PREFIX = "▎"
+# Pre-send merge: prepended to the re-queued old body so cc knows its prior
+# answer never reached the user and it should answer the merged thread fresh.
+_MERGE_NOTE = (
+    "[bridge: your previous reply was dropped — new messages arrived "
+    "mid-turn. Answer the full merged message below.]"
+)
 # Truncate display fragment: 40 CN chars or 80 ASCII chars.
 _FAKE_QUOTE_CN_MAX = 40
 _FAKE_QUOTE_ASCII_MAX = 80
