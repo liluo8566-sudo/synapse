@@ -38,6 +38,9 @@ class Config:
     # liveness check (poll process) and the hard idle kill (stall -> respawn).
     idle_soft_s: float = 60.0
     idle_hard_s: float = 300.0
+    # Hard idle threshold used instead of idle_hard_s while a tool_use is
+    # awaiting its tool_result (e.g. a long-running MCP tool call).
+    tool_idle_hard_s: float = 1800.0
     # Per-turn OUTPUT token brake: interrupt a runaway turn instead of burning
     # quota. 0 or negative disables.
     turn_output_cap: int = 20000
@@ -202,6 +205,13 @@ def load_config(path: Path | None = None) -> Config:
         hard = provider.get("idle_hard_s")
         if isinstance(hard, (int, float)) and not isinstance(hard, bool) and hard > 0:
             cfg.idle_hard_s = float(hard)
+        tool_hard = provider.get("tool_idle_hard_s")
+        if (
+            isinstance(tool_hard, (int, float))
+            and not isinstance(tool_hard, bool)
+            and tool_hard > 0
+        ):
+            cfg.tool_idle_hard_s = float(tool_hard)
         cap = provider.get("turn_output_cap")
         if isinstance(cap, int) and not isinstance(cap, bool):
             cfg.turn_output_cap = cap

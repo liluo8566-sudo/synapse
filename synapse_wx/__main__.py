@@ -245,6 +245,7 @@ def main() -> int:
             channel=CHANNEL,
             idle_soft_s=cfg.idle_soft_s,
             idle_hard_s=cfg.idle_hard_s,
+            tool_idle_hard_s=cfg.tool_idle_hard_s,
             turn_output_cap=cfg.turn_output_cap,
         )
 

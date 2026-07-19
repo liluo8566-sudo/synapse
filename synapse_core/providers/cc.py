@@ -56,6 +56,12 @@ _USAGE_KEYS = (
 _DEFAULT_IDLE_SOFT_S = 60.0
 _DEFAULT_IDLE_HARD_S = 300.0
 
+# While a tool_use is in flight (e.g. a long-running MCP tool), the stream
+# is legitimately silent between the assistant's tool_use event and the
+# matching tool_result — this is not a stall. Use a much longer hard
+# threshold during that window. Overridable per bridge via config.toml.
+_DEFAULT_TOOL_IDLE_HARD_S = 1800.0
+
 # Per-turn OUTPUT token brake: cancel a runaway turn (e.g. a huge thinking
 # spiral) instead of burning quota for 15 minutes. Overridable per bridge via
 # config.toml; 0 or negative disables. Counts ONLY newly produced output
@@ -142,6 +148,7 @@ class ClaudeCodeProvider(Provider):
         marrow_bridge: bool = False,
         idle_soft_s: float = _DEFAULT_IDLE_SOFT_S,
         idle_hard_s: float = _DEFAULT_IDLE_HARD_S,
+        tool_idle_hard_s: float = _DEFAULT_TOOL_IDLE_HARD_S,
         turn_output_cap: int = _DEFAULT_TURN_OUTPUT_CAP,
     ) -> None:
         self.model = model
@@ -159,6 +166,7 @@ class ClaudeCodeProvider(Provider):
         self.channel = channel
         self.idle_soft_s = idle_soft_s
         self.idle_hard_s = idle_hard_s
+        self.tool_idle_hard_s = tool_idle_hard_s
         self.turn_output_cap = turn_output_cap
         self.process: subprocess.Popen[str] | None = None
         self.alive: bool = False
@@ -176,6 +184,9 @@ class ClaudeCodeProvider(Provider):
         # values. Main-line only — subagent-attributed events are excluded.
         self.turn_output_capped: bool = False
         self._turn_output_by_request: dict[str, int] = {}
+        # tool_use ids seen without a matching tool_result yet. Non-empty ->
+        # _next_event() uses tool_idle_hard_s instead of idle_hard_s.
+        self._pending_tool_ids: set[str] = set()
 
     def _build_cmd(self) -> list[str]:
         cmd = [
@@ -244,6 +255,7 @@ class ClaudeCodeProvider(Provider):
         # queue gets to measure continuous silence for the idle policy.
         self._event_queue = queue.Queue()
         self._complete_turns = 0
+        self._pending_tool_ids = set()
         if self.stderr_log is not None:
             t = threading.Thread(
                 target=_drain_stderr,
@@ -324,25 +336,32 @@ class ClaudeCodeProvider(Provider):
         Measures CONTINUOUS silence: the deadline is reset by the caller each
         time an event arrives (a fresh _next_event call starts a new clock).
         - At idle_soft_s of silence: poll the subprocess. Dead -> ProviderDead;
-          alive -> keep waiting (self-heal window for a slow tool call).
-        - At idle_hard_s of silence: process-group kill, raise ProviderStall.
+          alive -> keep waiting (self-heal window for a slow tool call). Runs
+          on this fixed schedule regardless of tool state — a dead process is
+          reported immediately either way.
+        - At the hard threshold of silence: process-group kill, raise
+          ProviderStall. The hard threshold is idle_hard_s normally, but
+          widens to tool_idle_hard_s while a tool_use is awaiting its
+          tool_result (self._pending_tool_ids non-empty) — the stream is
+          legitimately silent during a long-running tool call.
         Returns the parsed event dict, or the None EOF sentinel put by the
         resident reader on clean stream end.
         """
         start = time.monotonic()
         soft_checked = False
         while True:
+            hard_s = self.tool_idle_hard_s if self._pending_tool_ids else self.idle_hard_s
             elapsed = time.monotonic() - start
-            if elapsed >= self.idle_hard_s:
+            if elapsed >= hard_s:
                 self._kill_process_group()
                 raise ProviderStallError(
-                    f"no stream event for {self.idle_hard_s:.0f}s (stall)"
+                    f"no stream event for {hard_s:.0f}s (stall)"
                 )
             # Wake at the next boundary (soft check, else hard deadline).
             if not soft_checked and elapsed < self.idle_soft_s:
                 wait = self.idle_soft_s - elapsed
             else:
-                wait = self.idle_hard_s - elapsed
+                wait = hard_s - elapsed
             try:
                 return self._event_queue.get(timeout=max(0.0, wait))
             except queue.Empty:
@@ -362,6 +381,7 @@ class ClaudeCodeProvider(Provider):
         # cycle so the counter measures ONLY this turn's newly produced output.
         self.turn_output_capped = False
         self._turn_output_by_request = {}
+        self._pending_tool_ids = set()
         saw_result = False
         while True:
             ev = self._next_event()
@@ -381,9 +401,13 @@ class ClaudeCodeProvider(Provider):
                     v = usage.get(k)
                     if isinstance(v, int):
                         self.usage_total[k] = self.usage_total.get(k, 0) + v
+                self._pending_tool_ids |= self._tool_use_ids(ev)
+            elif t == "user":
+                self._pending_tool_ids -= self._tool_result_ids(ev)
             yield ev
             if t == "result":
                 saw_result = True
+                self._pending_tool_ids = set()
                 with self._turn_lock:
                     self._complete_turns = max(0, self._complete_turns - 1)
                 break
@@ -405,6 +429,34 @@ class ClaudeCodeProvider(Provider):
         # result is a genuine mid-turn death.
         if not saw_result:
             raise ProviderDeadError("subprocess died during recv")
+
+    @staticmethod
+    def _tool_use_ids(ev: dict[str, Any]) -> set[str]:
+        """tool_use block ids in an "assistant" event's message content."""
+        content = (ev.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            return set()
+        ids: set[str] = set()
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                tid = block.get("id")
+                if isinstance(tid, str) and tid:
+                    ids.add(tid)
+        return ids
+
+    @staticmethod
+    def _tool_result_ids(ev: dict[str, Any]) -> set[str]:
+        """tool_result block ids (tool_use_id) in a "user" event's content."""
+        content = (ev.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            return set()
+        ids: set[str] = set()
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tid = block.get("tool_use_id")
+                if isinstance(tid, str) and tid:
+                    ids.add(tid)
+        return ids
 
     def _turn_output_breached(self, ev: dict[str, Any]) -> bool:
         """Accumulate this turn's OUTPUT tokens and report a cap breach.
