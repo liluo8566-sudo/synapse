@@ -244,7 +244,16 @@ def main() -> int:
 
     idle_loop.start()
 
-    app = Application.builder().token(cfg.bot_token).build()
+    app = (
+        Application.builder()
+        .token(cfg.bot_token)
+        .connect_timeout(10.0)
+        .read_timeout(20.0)
+        .write_timeout(20.0)
+        .pool_timeout(10.0)
+        .media_write_timeout(60.0)
+        .build()
+    )
     app.add_handler(MessageHandler(filters.TEXT, loop.on_message))
     app.add_handler(MessageHandler(filters.PHOTO, loop.on_photo))
     app.add_handler(MessageHandler(filters.ANIMATION, loop.on_animation))

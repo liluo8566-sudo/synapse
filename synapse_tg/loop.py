@@ -160,6 +160,7 @@ class TgLoop:
         self._provider: ClaudeCodeProvider | None = None
         self._lock = asyncio.Lock()
         self._death_count = 0
+        self._net_retry_count = 0
         self._buffer = InboundBuffer()
         self._pending_chat_id: int | None = None
         self._bot: Bot | None = None
@@ -1069,6 +1070,7 @@ class TgLoop:
                                 )
                             except Exception as e:
                                 logger.warning("last_active write failed: %s", e)
+                        self._net_retry_count = 0
                         break
                     except ProviderDeadError as e:
                         if self._user_initiated_close:
@@ -1092,8 +1094,18 @@ class TgLoop:
             except (TimedOut, NetworkError) as e:
                 logger.warning("network error during turn processing: %s", e)
                 if stream_msg_id is None:
-                    # Nothing delivered yet — safe to retry the same body next flush.
-                    self._buffer.prepend(body)
+                    # Nothing delivered yet — safe to retry the same body next flush,
+                    # but only once: unbounded retries would keep re-feeding the
+                    # provider (burning tokens) and can deliver duplicate replies
+                    # during sustained degradation.
+                    if self._net_retry_count < 1:
+                        self._net_retry_count += 1
+                        self._buffer.prepend(body)
+                    else:
+                        logger.error(
+                            "turn abandoned after network retry (chat_id=%s): %r",
+                            chat_id, body[:120],
+                        )
                 # else: a stream bubble already reached Telegram; the timeout was
                 # on the response, not the send — don't retry (would double-send).
                 return
