@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from telegram.error import NetworkError, TimedOut
 
 if TYPE_CHECKING:
     from telegram import Bot, Message
@@ -14,18 +17,42 @@ TG_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # 20 MB
 
 _READ_TOOL_PREFIX = "Use the Read tool to view: "
 
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF_SEC = (1.0, 3.0)
+
 
 def _uid() -> str:
     return uuid.uuid4().hex[:12]
 
 
+async def _with_retry(fn, *args, **kwargs):
+    """Retry a telegram network call on transient TimedOut/NetworkError.
+
+    Up to _RETRY_ATTEMPTS total tries with short backoff between them.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            return await fn(*args, **kwargs)
+        except (TimedOut, NetworkError) as exc:
+            last_exc = exc
+            if attempt < _RETRY_ATTEMPTS - 1:
+                logger.warning(
+                    "transient network error, retrying (attempt %d/%d): %s",
+                    attempt + 1, _RETRY_ATTEMPTS, exc,
+                )
+                await asyncio.sleep(_RETRY_BACKOFF_SEC[attempt])
+    assert last_exc is not None
+    raise last_exc
+
+
 async def download_tg_file(bot: "Bot", file_id: str, dest_dir: Path, suffix: str) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
-    tg_file = await bot.get_file(file_id)
+    tg_file = await _with_retry(bot.get_file, file_id)
     if tg_file.file_size and tg_file.file_size > TG_DOWNLOAD_LIMIT:
         logger.warning("download_tg_file: file %s is %d bytes, exceeds 20MB TG limit", file_id, tg_file.file_size)
     dest = dest_dir / f"{_uid()}{suffix}"
-    await tg_file.download_to_drive(dest)
+    await _with_retry(tg_file.download_to_drive, dest)
     return dest
 
 
@@ -45,14 +72,14 @@ async def materialize_document(bot: "Bot", message: "Message", data_dir: Path) -
     dest_dir = data_dir / "media" / "Documents"
     dest_dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(doc.file_name).suffix if doc.file_name and "." in doc.file_name else ".bin"
-    tg_file = await bot.get_file(doc.file_id)
+    tg_file = await _with_retry(bot.get_file, doc.file_id)
     if tg_file.file_size and tg_file.file_size > TG_DOWNLOAD_LIMIT:
         logger.warning("materialize_document: file %s is %d bytes, exceeds 20MB TG limit", doc.file_id, tg_file.file_size)
     filename = doc.file_name if doc.file_name else f"{_uid()}{suffix}"
     dest = dest_dir / filename
     if dest.exists():
         dest = dest_dir / f"{_uid()}_{filename}"
-    await tg_file.download_to_drive(dest)
+    await _with_retry(tg_file.download_to_drive, dest)
     return dest
 
 

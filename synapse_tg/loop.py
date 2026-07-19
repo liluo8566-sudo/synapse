@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from telegram import Bot, Update
-from telegram.error import RetryAfter
+from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes
 
 from synapse_core import bridge_state_store, heartbeat, last_active
@@ -1089,6 +1089,14 @@ class TgLoop:
                         self._buffer.prepend(body)
                         await self._send_provider_notice(bot, chat_id, "provider.restarting")
                         return
+            except (TimedOut, NetworkError) as e:
+                logger.warning("network error during turn processing: %s", e)
+                if stream_msg_id is None:
+                    # Nothing delivered yet — safe to retry the same body next flush.
+                    self._buffer.prepend(body)
+                # else: a stream bubble already reached Telegram; the timeout was
+                # on the response, not the send — don't retry (would double-send).
+                return
             except Exception as e:
                 logger.error("unexpected error: %s", e)
                 await bot.send_message(chat_id=chat_id, text=messages.t("bridge.error", self._state.voice_style))

@@ -268,7 +268,23 @@ def main() -> int:
 
     async def _error_handler(update, context):
         if isinstance(context.error, (NetworkError, TimedOut)):
-            logger.warning("transient network error (auto-retry): %s", context.error)
+            if update is None:
+                # Polling-level error (getUpdates) — PTB retries this internally.
+                logger.warning("transient network error (auto-retry): %s", context.error)
+                return
+            # Handler-level error: the update was already consumed by PTB
+            # before the exception fired, so it is lost — no auto-retry.
+            chat = getattr(update, "effective_chat", None)
+            msg = getattr(update, "effective_message", None)
+            logger.warning(
+                "inbound message dropped by transient network error (chat_id=%s, message_id=%s): %s",
+                getattr(chat, "id", None), getattr(msg, "message_id", None), context.error,
+            )
+            if chat is not None:
+                try:
+                    await context.bot.send_message(chat_id=chat.id, text=messages.t("bridge.error"))
+                except Exception:
+                    logger.warning("failed to notify chat %s of dropped message", getattr(chat, "id", None))
             return
         logger.exception("unhandled error", exc_info=context.error)
 
