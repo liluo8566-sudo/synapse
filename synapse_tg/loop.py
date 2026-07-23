@@ -26,7 +26,7 @@ from synapse_core.marrow_session import get_session_created_at, get_session_effo
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
-from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT
+from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, POLL_EOF, QUOTE_SYSTEM_PROMPT
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.state import BridgeState
 
@@ -71,6 +71,18 @@ def _is_unsolicited_first_event(ev: dict) -> bool:
     """A turn whose FIRST event is system/task_notification is unsolicited:
     the CLI ran a NEW turn with no stdin (background task completion)."""
     return ev.get("type") == "system" and ev.get("subtype") == "task_notification"
+
+
+class _NullTyping:
+    """No-op typing sink for draining a turn with no chat target."""
+
+    running = True
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
 
 
 TG_BUBBLE_FORMAT_PROMPT = (
@@ -144,6 +156,9 @@ class TgLoop:
             )
         self._user_initiated_close = False
         self._msg_id_cache: collections.OrderedDict[int, str] = collections.OrderedDict()
+        # Resident idle listener: drains unsolicited (background-task) turns
+        # between sends so they never rot in the stdout queue and mispair.
+        self._listener_stop = asyncio.Event()
 
     def _load_state(self) -> BridgeState:
         state = BridgeState(model=self._cfg.default_model)
@@ -466,6 +481,92 @@ class TgLoop:
             unsolicited_count += 1
             self._maybe_storm_alert(unsolicited_count)
             await self._deliver_reply(bot, chat_id, text, thinking)
+
+    async def _listen_once(self) -> None:
+        """One idle-listener iteration. Polls INSIDE the flush lock so it can
+        never overlap a send; sleeps OUTSIDE it (in _idle_listener) so a
+        pending check_flush can win the lock. Re-reads self._provider fresh —
+        never caches it (a slash-command swap replaces the object without
+        holding this lock)."""
+        provider = self._provider
+        if provider is None or not getattr(provider, "alive", False):
+            return  # nothing to drain; lazy respawn happens on the next send
+        bot = self._bot
+        chat_id = self._pending_chat_id
+
+        async with self._lock:
+            # Re-read after acquiring: a swap may have replaced it while waiting.
+            provider = self._provider
+            if provider is None or not getattr(provider, "alive", False):
+                return
+            line = await asyncio.to_thread(provider.poll_line, _LISTEN_POLL_TIMEOUT_SEC)
+            if line is None:
+                return
+            if line is POLL_EOF:
+                logger.info("idle listener: provider EOF — marked dead, awaiting respawn")
+                provider.alive = False
+                return
+            # A line means a full turn is arriving unsolicited. Target the last
+            # real chat; if none, drop with a warning (never crash).
+            if bot is None or chat_id is None:
+                logger.warning("idle listener: unsolicited turn with no chat target — dropped")
+                # Still drain the turn so it doesn't rot in the queue.
+                await self._collect_turn(_NullTyping(), first_line=line)
+                return
+            typing = TypingAction(bot, chat_id)
+            typing.start()
+            try:
+                await self._drain_unsolicited(bot, chat_id, typing, line)
+            finally:
+                typing.stop()
+
+    async def _drain_unsolicited(
+        self, bot: Bot, chat_id: int, typing: TypingAction, first_line: str
+    ) -> None:
+        """Collect and deliver the unsolicited turn opened by first_line, plus
+        any consecutive back-to-back turns already queued behind it."""
+        count = 0
+        line: str | None = first_line
+        while line is not None:
+            turn = await self._collect_turn(typing, first_line=line)
+            if turn is not None:
+                text, thinking, _unsolicited = turn
+                count += 1
+                self._maybe_storm_alert(count)
+                await self._deliver_reply(bot, chat_id, text, thinking)
+            # Peek for the next queued turn without blocking on idle liveness.
+            provider = self._provider
+            if provider is None or not getattr(provider, "alive", False):
+                break
+            nxt = provider.poll_line(0.0)
+            if nxt is None or nxt is POLL_EOF:
+                if nxt is POLL_EOF:
+                    provider.alive = False
+                break
+            line = nxt
+
+    async def _idle_listener(self) -> None:
+        """Resident task: drain unsolicited turns between sends for the life of
+        the bridge. Never dies from an exception (catch-all -> log -> continue).
+        Stops on _listener_stop (clean shutdown)."""
+        logger.info("idle listener started")
+        while not self._listener_stop.is_set():
+            try:
+                await self._listen_once()
+            except Exception as e:  # never let the listener die
+                logger.warning("idle listener iteration error: %s", e)
+            # Sleep OUTSIDE the lock so a pending check_flush wins it (FIFO
+            # waiters + this window).
+            try:
+                await asyncio.wait_for(
+                    self._listener_stop.wait(), timeout=_LISTEN_RELEASE_SLEEP_SEC
+                )
+            except asyncio.TimeoutError:
+                pass
+        logger.info("idle listener stopped")
+
+    def stop_listener(self) -> None:
+        self._listener_stop.set()
 
     def _merge_usage(self, usage: dict[str, Any]) -> None:
         for k, v in usage.items():

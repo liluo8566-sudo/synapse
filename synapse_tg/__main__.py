@@ -241,11 +241,26 @@ def main() -> int:
         write_timeout=cfg.http_write_timeout_s,
         pool_timeout=cfg.http_pool_timeout_s,
     )
+    # Resident idle listener: drains unsolicited (background-task) turns while
+    # no send is pending so they deliver on completion instead of mispairing.
+    listener_box: dict = {"task": None}
+
+    async def _post_init(application) -> None:
+        listener_box["task"] = application.create_task(loop._idle_listener())
+
+    async def _post_shutdown(application) -> None:
+        loop.stop_listener()
+        task = listener_box["task"]
+        if task is not None:
+            task.cancel()
+
     app = (
         Application.builder()
         .token(cfg.bot_token)
         .request(HTTPXRequest(**_timeouts))
         .get_updates_request(HTTPXRequest(**_timeouts))
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
         .build()
     )
     app.add_handler(MessageHandler(filters.TEXT, loop.on_message))
