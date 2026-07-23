@@ -40,6 +40,9 @@ class Config:
     # Per-turn OUTPUT token brake: interrupt a runaway turn instead of burning
     # quota. 0 or negative disables.
     turn_output_cap: int = 20000
+    # Storm guard: more than this many unsolicited (background-task) turns
+    # delivered within one lock-hold raises a bridge_turn_storm alert. 0 disables.
+    unsolicited_storm_cap: int = 5
     # B1 sessions table. Empty = bridge runs without marrow session persistence
     # (no row written, /resume falls back to jsonl grep). Format strings get
     # {sid}, {model}, {channel} substituted.
@@ -187,6 +190,9 @@ def load_config(path: Path | None = None) -> Config:
         cap = provider.get("turn_output_cap")
         if isinstance(cap, int) and not isinstance(cap, bool):
             cfg.turn_output_cap = cap
+        storm = provider.get("unsolicited_storm_cap")
+        if isinstance(storm, int) and not isinstance(storm, bool) and storm >= 0:
+            cfg.unsolicited_storm_cap = storm
     session = data.get("session") or {}
     if isinstance(session, dict):
         for field_name in (
