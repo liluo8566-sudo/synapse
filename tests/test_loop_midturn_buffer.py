@@ -1,10 +1,7 @@
-"""Mid-turn inbound: pre-send merge. A reply produced while new inbound was
-arriving answers a stale snapshot, so it is DROPPED and the old body is
-re-queued at the front of the buffer (with _MERGE_NOTE) for one merged turn.
+"""Mid-turn inbound: the reply always ships; messages that arrived while cc
+was producing the reply stay in the InboundBuffer and become the next turn.
 
-This fork keeps the pre-send merge that upstream removed in c7d427c —
-upstream dropped it as an (ineffective) anti-quota mechanism, but here it
-guards reply freshness, orthogonal to the bubble-cap/quota-wait defenses.
+Replaces the old pre-send merge behavior (reply dropped + re-queued).
 """
 
 from __future__ import annotations
@@ -124,12 +121,9 @@ def _make_loop(env, ilink, provider) -> tuple[MainLoop, FakeClock]:
     return loop, clock
 
 
-def test_midturn_inbound_drops_reply_and_requeues_merged(env) -> None:
-    """New inbound arrives during recv → stale reply DROPPED; old body is
-    re-queued at the buffer front with _MERGE_NOTE so the next flush runs
-    one merged turn."""
-    from synapse_wx.loop import _MERGE_NOTE
-
+def test_reply_ships_even_when_buffer_nonempty_after_drain(env) -> None:
+    """New inbound arrives during recv → reply STILL sent; mid-turn bubble
+    stays in the buffer for the next turn (no drop, no merge)."""
     ilink = FakeILink()
     loop_ref: list = []
     provider = InjectingProvider("the reply", loop_ref)
@@ -144,16 +138,14 @@ def test_midturn_inbound_drops_reply_and_requeues_merged(env) -> None:
     clock.advance(6.0)
     loop.maybe_flush()
 
-    # Stale reply never shipped.
-    assert not ilink.sent, "Stale reply must be dropped, not sent"
+    # Reply shipped despite the mid-turn bubble.
+    assert ilink.sent, "Expected the reply to ship"
+    assert ilink.sent[0][2] == "the reply"
 
-    # Buffer holds the re-queued old body (merge-noted) plus the mid-turn
-    # bubble, ready for one merged turn.
-    clock.advance(6.0)
+    # The mid-turn bubble survives untouched for the next turn.
+    assert len(loop._buffer) == 1
     flushed = loop._buffer.flush()
-    assert flushed.startswith(_MERGE_NOTE)
-    assert "original message" in flushed
-    assert "new bubble mid-turn" in flushed
+    assert flushed == "new bubble mid-turn"
 
 
 def test_no_new_inbound_reply_sent_normally(env) -> None:

@@ -17,7 +17,7 @@ class Provider(abc.ABC):
         """Write a user message into the subprocess stdin."""
 
     @abc.abstractmethod
-    def recv(self) -> Iterator[dict[str, Any]]:
+    def recv(self, first_line: str | None = None) -> Iterator[dict[str, Any]]:
         """Yield events from stdout until the turn's result event.
 
         Raises if subprocess dies mid-stream.

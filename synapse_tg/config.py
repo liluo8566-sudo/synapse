@@ -31,6 +31,9 @@ class TgConfig:
     # Per-turn OUTPUT token brake: interrupt a runaway turn instead of burning
     # quota. 0 or negative disables.
     turn_output_cap: int = 20000
+    # Storm guard: more than this many unsolicited (background-task) turns
+    # delivered within one lock-hold raises a marrow alert. 0 disables.
+    unsolicited_storm_cap: int = 5
     user_name: str = "user"
     assistant_name: str = "assistant"
 
@@ -49,6 +52,13 @@ class TgConfig:
     # Outbound send resilience
     send_retry_max: int = 2
     retry_after_cap_sec: float = 60.0
+
+    # HTTPX transport timeouts (seconds) for the PTB Bot. get_updates uses a
+    # separate request whose read timeout must stay above the long-poll timeout.
+    http_connect_timeout_s: float = 10.0
+    http_read_timeout_s: float = 30.0
+    http_write_timeout_s: float = 30.0
+    http_pool_timeout_s: float = 10.0
 
     # Outbox (cross-channel note delivery). Feature no-ops without chat_id.
     chat_id: int | None = None
@@ -170,6 +180,9 @@ def load_config(path: Path | None = None) -> TgConfig:
         cap = provider.get("turn_output_cap")
         if isinstance(cap, int) and not isinstance(cap, bool):
             cfg.turn_output_cap = cap
+        storm = provider.get("unsolicited_storm_cap")
+        if isinstance(storm, int) and not isinstance(storm, bool) and storm >= 0:
+            cfg.unsolicited_storm_cap = storm
 
     storage = data.get("storage") or {}
     if isinstance(storage, dict):
@@ -210,6 +223,15 @@ def load_config(path: Path | None = None) -> TgConfig:
             cfg.send_retry_max = send["send_retry_max"]
         if isinstance(send.get("retry_after_cap_sec"), (int, float)) and not isinstance(send.get("retry_after_cap_sec"), bool):
             cfg.retry_after_cap_sec = float(send["retry_after_cap_sec"])
+        for key, attr in (
+            ("http_connect_timeout_s", "http_connect_timeout_s"),
+            ("http_read_timeout_s", "http_read_timeout_s"),
+            ("http_write_timeout_s", "http_write_timeout_s"),
+            ("http_pool_timeout_s", "http_pool_timeout_s"),
+        ):
+            v = send.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                setattr(cfg, attr, float(v))
 
     if isinstance(provider.get("cc_projects_dir"), str):
         cfg.cc_projects_dir = provider["cc_projects_dir"]

@@ -41,7 +41,7 @@ class EchoProvider(Provider):
             {"type": "result", "result": f"echo: {msg}", "session_id": _MOCK_SID}
         )
 
-    def recv(self) -> Iterator[dict[str, Any]]:
+    def recv(self, first_line: str | None = None) -> Iterator[dict[str, Any]]:
         if not self.alive:
             raise ProviderDeadError("echo provider not spawned")
         while self._queue:

@@ -11,7 +11,6 @@ import queue
 import re
 import subprocess
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -29,7 +28,7 @@ from synapse_core.marrow_session import get_session_created_at, get_session_effo
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
-from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT
+from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, POLL_EOF, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT
 from synapse_core.providers.codex import CodexProvider, is_codex_model
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.state import BridgeState
@@ -54,24 +53,40 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_MERGE_NOTE = (
-    "[bridge: your previous reply was dropped — new messages arrived "
-    "mid-turn. Answer the full merged message below.]"
-)
-
 _SEND_GAP_SEC = 0.05
 _AUTONOMOUS_DRAIN_TIMEOUT = 120
 _MAX_CONSECUTIVE_DEATHS = 3
 _FLUSH_INTERVAL_SEC = 0.5
 # Extra seconds added on top of a 429 RetryAfter before retrying the send.
 _RETRY_AFTER_MARGIN_SEC = 0.5
+# Idle listener scheduling (internal, not user-varying): poll one line each
+# iteration; after releasing the lock, yield long enough for a pending
+# check_flush to win it (asyncio.Lock wakes waiters FIFO; the sleep guarantees
+# a window).
+_LISTEN_POLL_TIMEOUT_SEC = 1.0
+_LISTEN_RELEASE_SLEEP_SEC = 0.25
 
-# Streaming config
-_STREAM_EDIT_INTERVAL = 1.0   # seconds between intermediate edits
-_STREAM_EDIT_CHARS = 200      # or every N new chars, whichever comes first
+# Marker the recv-drain thread puts after each turn's result so the async
+# consumer can tell turn boundaries apart across multiple back-to-back turns.
+_TURN_END = object()
 
-# Strip media tags from streaming preview — handled after completion
-_MEDIA_TAG_RE = re.compile(r'<(image|gif|video|file)\s+path="[^"]*"\s*/?>', re.IGNORECASE)
+
+def _is_unsolicited_first_event(ev: dict) -> bool:
+    """A turn whose FIRST event is system/task_notification is unsolicited:
+    the CLI ran a NEW turn with no stdin (background task completion)."""
+    return ev.get("type") == "system" and ev.get("subtype") == "task_notification"
+
+
+class _NullTyping:
+    """No-op typing sink for draining a turn with no chat target."""
+
+    running = True
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
 
 # HTML-comment silence protocol lives in synapse_core.text_filters;
 # re-exported here so existing imports keep working.
@@ -107,17 +122,21 @@ TG_BUBBLE_FORMAT_PROMPT = (
 )
 
 
-def _recv_to_queue(provider: ClaudeCodeProvider, q: "queue.Queue") -> None:
-    """Background thread: drain provider.recv() into a queue. Sentinel = None.
+def _recv_to_queue(
+    provider: ClaudeCodeProvider, q: "queue.Queue", first_line: str | None = None
+) -> None:
+    """Background thread: drain ONE provider.recv() turn into a queue.
 
-    The provider owns liveness now (soft check + hard idle kill in recv), so a
-    stall/death surfaces as an exception put on the queue — no per-turn queue
-    timeout here. The async consumer blocks on q.get() until an event, the
-    exception, or the None sentinel arrives.
+    Puts each event, then a _TURN_END marker after the turn's result, then a
+    None sentinel when the thread finishes. The provider owns liveness (soft
+    check + hard idle kill in recv), so a stall/death surfaces as an exception
+    on the queue. `first_line` is a raw line the idle listener already pulled
+    off the queue; recv processes it before reading further.
     """
     try:
-        for ev in provider.recv():
+        for ev in provider.recv(first_line=first_line):
             q.put(ev)
+        q.put(_TURN_END)
     except Exception as exc:
         q.put(exc)
     finally:
@@ -171,9 +190,6 @@ class TgLoop:
             logger.info("boot resume: restored pending_chat_id=%s", self._state.chat_id)
         self._registry = self._build_registry()
         self._queued_extra_bubbles: list[str] = []
-        self._pending_user_id: int | None = None
-        self._turn_user_id: int | None = None
-        self._same_sender_interrupted = False
         self._session_created_at: str | None = None
         if self._state.session_id:
             self._session_created_at = get_session_created_at(
@@ -181,6 +197,9 @@ class TgLoop:
             )
         self._user_initiated_close = False
         self._msg_id_cache: collections.OrderedDict[int, str] = collections.OrderedDict()
+        # Resident idle listener: drains unsolicited (background-task) turns
+        # between sends so they never rot in the stdout queue and mispair.
+        self._listener_stop = asyncio.Event()
 
     def _load_state(self) -> BridgeState:
         state = BridgeState(model=self._cfg.default_model)
@@ -392,86 +411,76 @@ class TgLoop:
         self._death_count = 0
         return "\n\n".join(chunks), "\n".join(thinking)
 
-    async def _stream_response(
-        self, bot: Bot, chat_id: int, typing: TypingAction
-    ) -> tuple[str, str]:
-        """Stream provider response live via edit_message_text.
+    def _handle_init_event(self, ev: dict) -> None:
+        """Shared system(init) handling: adopt session_id, stamp created_at,
+        record the session. Used by every turn (solicited + unsolicited)."""
+        sid = ev.get("session_id")
+        if not (sid and isinstance(sid, str)):
+            return
+        if self._state.session_id != sid:
+            self._state.session_id = sid
+            self._session_created_at = get_session_created_at(
+                self._cfg.session_created_command, sid
+            ) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self._persist_state()
+        elif not self._session_created_at:
+            self._session_created_at = get_session_created_at(
+                self._cfg.session_created_command, sid
+            ) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if self._sessions is not None and self._pending_chat_id is not None:
+            self._sessions.set(str(self._pending_chat_id), sid)
+        if self._record_session is not None:
+            try:
+                self._record_session(sid, self._state.model)
+            except Exception:
+                logger.warning("record_session failed for %s", sid)
 
-        Returns (full_text, thinking) after completion.
-        Typing action is stopped once the first message is sent.
+    async def _collect_turn(
+        self, typing: TypingAction, first_line: str | None = None
+    ) -> tuple[str, str, bool] | None:
+        """Drain ONE turn from the provider. Returns (text, thinking,
+        unsolicited) or None when the recv thread ended before any turn
+        (clean EOF between turns). Raises on provider death mid-turn.
+
+        `first_line` is a raw line the idle listener already pulled off the
+        queue that opened this turn; recv processes it before the queue.
         """
         assert self._provider is not None
-
         q: queue.Queue = queue.Queue()
         t = threading.Thread(
             target=_recv_to_queue,
-            args=(self._provider, q),
+            args=(self._provider, q, first_line),
             daemon=True,
         )
         t.start()
 
         text_chunks: list[str] = []
         thinking_chunks: list[str] = []
-        stream_msg_id: int | None = None
-        accumulated = ""        # preview text accumulated so far
-        preview_frozen = False  # stop updating preview after first \n\n
-        last_edit_time = 0.0
-        chars_since_edit = 0
-
-        async def _do_edit(text: str) -> None:
-            nonlocal last_edit_time, chars_since_edit
-            if stream_msg_id is None or not text:
-                return
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=stream_msg_id,
-                    text=text,
-                )
-                last_edit_time = time.monotonic()
-                chars_since_edit = 0
-            except Exception:
-                # Unchanged text or rate-limit — skip silently
-                pass
-
+        unsolicited = False
+        first_event = True
+        completed = False
         loop = asyncio.get_event_loop()
 
         while True:
-            # No queue timeout: the provider's own liveness logic (soft check +
-            # hard idle kill) surfaces stall/death as an exception on the queue.
             ev = await loop.run_in_executor(None, q.get)
-
             if ev is None:
-                # Sentinel: thread finished cleanly
                 break
+            if ev is _TURN_END:
+                completed = True
+                continue
             if isinstance(ev, Exception):
                 raise ev
 
-            t_type = ev.get("type")
+            if first_event:
+                unsolicited = _is_unsolicited_first_event(ev)
+                first_event = False
 
+            t_type = ev.get("type")
             if t_type == "system":
                 if ev.get("subtype") == "init":
-                    sid = ev.get("session_id")
-                    if sid and isinstance(sid, str):
-                        if self._state.session_id != sid:
-                            self._state.session_id = sid
-                            self._session_created_at = get_session_created_at(
-                                self._cfg.session_created_command, sid
-                            ) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                            self._persist_state()
-                        elif not self._session_created_at:
-                            self._session_created_at = get_session_created_at(
-                                self._cfg.session_created_command, sid
-                            ) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                        if self._sessions is not None and self._pending_chat_id is not None:
-                            self._sessions.set(str(self._pending_chat_id), sid)
-                        if self._record_session is not None:
-                            try:
-                                self._record_session(sid, self._state.model)
-                            except Exception:
-                                logger.warning("record_session failed for %s", sid)
+                    self._handle_init_event(ev)
+                # task_notification and other system frames yield no text.
                 continue
-
             if t_type == "assistant":
                 msg = ev.get("message") or {}
                 for block in msg.get("content", []):
@@ -480,42 +489,6 @@ class TgLoop:
                         chunk = block.get("text", "")
                         if chunk:
                             text_chunks.append(chunk)
-                            if not preview_frozen:
-                                preview_chunk = _MEDIA_TAG_RE.sub("", chunk)
-                                preview_chunk = _HTML_COMMENT_RE.sub("", preview_chunk)
-                                if preview_chunk:
-                                    accumulated += preview_chunk
-                                    # Freeze preview at first bubble boundary
-                                    if "\n\n" in accumulated:
-                                        accumulated = accumulated.split("\n\n", 1)[0]
-                                        preview_frozen = True
-                                    chars_since_edit += len(preview_chunk)
-
-                                    # Guard: truncate display at unclosed <!--
-                                    display_text = accumulated
-                                    open_idx = display_text.find("<!--")
-                                    if open_idx != -1:
-                                        display_text = display_text[:open_idx]
-
-                                    if not display_text.strip():
-                                        continue
-
-                                    if stream_msg_id is None:
-                                        typing.stop()
-                                        sent = await bot.send_message(
-                                            chat_id=chat_id, text=display_text
-                                        )
-                                        stream_msg_id = sent.message_id
-                                        last_edit_time = time.monotonic()
-                                        chars_since_edit = 0
-                                    else:
-                                        now = time.monotonic()
-                                        if (
-                                            now - last_edit_time >= _STREAM_EDIT_INTERVAL
-                                            or chars_since_edit >= _STREAM_EDIT_CHARS
-                                        ):
-                                            await _do_edit(display_text)
-
                     elif bt == "tool_use":
                         if not typing.running:
                             typing.start()
@@ -548,22 +521,153 @@ class TgLoop:
                         if isinstance(txt, str) and txt:
                             thinking_chunks.append(txt)
 
+
             elif t_type == "result":
                 usage = ev.get("usage")
                 if isinstance(usage, dict):
                     self._merge_usage(usage)
-                break
 
+        if not completed and first_event:
+            # Thread ended with no events at all (clean EOF between turns).
+            return None
         self._death_count = 0
-        full_text = "\n\n".join(text_chunks)
-        thinking = "".join(thinking_chunks).strip()
+        return "\n\n".join(text_chunks), "\n".join(thinking_chunks), unsolicited
 
-        return full_text, thinking, stream_msg_id
+    async def _stream_response(
+        self, bot: Bot, chat_id: int, typing: TypingAction
+    ) -> tuple[str, str]:
+        """Drain provider turns until the first solicited reply turn.
+
+        Any unsolicited turn (background task completion) seen before the
+        solicited reply is delivered immediately via _deliver_reply, then
+        collection continues. Returns the solicited turn's (text, thinking).
+        """
+        assert self._provider is not None
+        unsolicited_count = 0
+        while True:
+            turn = await self._collect_turn(typing)
+            if turn is None:
+                return "", ""
+            text, thinking, unsolicited = turn
+            if not unsolicited:
+                return text, thinking
+            unsolicited_count += 1
+            self._maybe_storm_alert(unsolicited_count)
+            await self._deliver_reply(bot, chat_id, text, thinking)
+
+    async def _listen_once(self) -> None:
+        """One idle-listener iteration. Polls INSIDE the flush lock so it can
+        never overlap a send; sleeps OUTSIDE it (in _idle_listener) so a
+        pending check_flush can win the lock. Re-reads self._provider fresh —
+        never caches it (a slash-command swap replaces the object without
+        holding this lock)."""
+        provider = self._provider
+        if provider is None or not getattr(provider, "alive", False):
+            return  # nothing to drain; lazy respawn happens on the next send
+        bot = self._bot
+        chat_id = self._pending_chat_id
+
+        async with self._lock:
+            # Re-read after acquiring: a swap may have replaced it while waiting.
+            provider = self._provider
+            if provider is None or not getattr(provider, "alive", False):
+                return
+            line = await asyncio.to_thread(provider.poll_line, _LISTEN_POLL_TIMEOUT_SEC)
+            if line is None:
+                return
+            if line is POLL_EOF:
+                logger.info("idle listener: provider EOF — marked dead, awaiting respawn")
+                provider.alive = False
+                return
+            # A line means a full turn is arriving unsolicited. Target the last
+            # real chat; if none, drop with a warning (never crash).
+            if bot is None or chat_id is None:
+                logger.warning("idle listener: unsolicited turn with no chat target — dropped")
+                # Still drain the turn so it doesn't rot in the queue.
+                await self._collect_turn(_NullTyping(), first_line=line)
+                return
+            typing = TypingAction(bot, chat_id)
+            typing.start()
+            try:
+                await self._drain_unsolicited(bot, chat_id, typing, line)
+            finally:
+                typing.stop()
+
+    async def _drain_unsolicited(
+        self, bot: Bot, chat_id: int, typing: TypingAction, first_line: str
+    ) -> None:
+        """Collect and deliver the unsolicited turn opened by first_line, plus
+        any consecutive back-to-back turns already queued behind it."""
+        count = 0
+        line: str | None = first_line
+        while line is not None:
+            turn = await self._collect_turn(typing, first_line=line)
+            if turn is not None:
+                text, thinking, _unsolicited = turn
+                count += 1
+                self._maybe_storm_alert(count)
+                await self._deliver_reply(bot, chat_id, text, thinking)
+            # Peek for the next queued turn without blocking on idle liveness.
+            provider = self._provider
+            if provider is None or not getattr(provider, "alive", False):
+                break
+            nxt = provider.poll_line(0.0)
+            if nxt is None or nxt is POLL_EOF:
+                if nxt is POLL_EOF:
+                    provider.alive = False
+                break
+            line = nxt
+
+    async def _idle_listener(self) -> None:
+        """Resident task: drain unsolicited turns between sends for the life of
+        the bridge. Never dies from an exception (catch-all -> log -> continue).
+        Stops on _listener_stop (clean shutdown)."""
+        logger.info("idle listener started")
+        while not self._listener_stop.is_set():
+            try:
+                await self._listen_once()
+            except Exception as e:  # never let the listener die
+                logger.warning("idle listener iteration error: %s", e)
+            # Sleep OUTSIDE the lock so a pending check_flush wins it (FIFO
+            # waiters + this window).
+            try:
+                await asyncio.wait_for(
+                    self._listener_stop.wait(), timeout=_LISTEN_RELEASE_SLEEP_SEC
+                )
+            except asyncio.TimeoutError:
+                pass
+        logger.info("idle listener stopped")
+
+    def stop_listener(self) -> None:
+        self._listener_stop.set()
 
     def _merge_usage(self, usage: dict[str, Any]) -> None:
         for k, v in usage.items():
             if isinstance(v, int):
                 self._state.usage_total[k] = self._state.usage_total.get(k, 0) + v
+
+    def _maybe_storm_alert(self, count: int) -> None:
+        """More than unsolicited_storm_cap unsolicited turns in one lock-hold
+        signals the CLI protocol may have started mispairing again. Alert once
+        (at cap+1) + log ERROR; delivery keeps going regardless."""
+        cap = self._cfg.unsolicited_storm_cap
+        if cap <= 0 or count != cap + 1:
+            return
+        logger.error(
+            "unsolicited turn storm: %d turns in one lock-hold (cap %d)",
+            count, cap,
+        )
+        if self._alerts is not None:
+            try:
+                self._alerts.write(
+                    "warn", "bridge_turn_storm",
+                    f"{count} unsolicited turns delivered in one lock-hold "
+                    f"(cap {cap}) — possible CLI mispairing",
+                    source="loop.stream",
+                    fingerprint="bridge_turn_storm",
+                )
+            except Exception as ae:
+                logger.warning("alerts.write failed: %s", ae)
 
     async def _send_provider_notice(self, bot: Bot, chat_id: int, key: str) -> None:
         try:
@@ -718,7 +822,8 @@ class TgLoop:
         chat_id = self._cfg.chat_id
         prefix = self._cfg.outbox_note_prefix
         for row in rows:
-            body = prefix + (row["body"] or "") if prefix else (row["body"] or "")
+            raw = row["body"] or ""
+            body = prefix + raw if prefix and not raw.startswith(prefix) else raw
             await self._deliver_outbox_row(bot, chat_id, row["id"], body)
 
     async def _deliver_outbox_row(
@@ -753,8 +858,9 @@ class TgLoop:
                 return
             await asyncio.sleep(_SEND_GAP_SEC)
         outbox.mark_sent(db, row_id)
+        logger.info("outbox row #%d delivered", row_id)
 
-    def _track(self, bot: Bot, chat_id: int, user_id: int | None = None,
+    def _track(self, bot: Bot, chat_id: int,
                text: str = "", msg_date: datetime | None = None,
                media_type: str = "") -> None:
         self._bot = bot
@@ -762,10 +868,6 @@ class TgLoop:
         if self._state.chat_id != chat_id:
             self._state.chat_id = chat_id
             self._persist_state()
-        if user_id is not None:
-            self._pending_user_id = user_id
-            if self._turn_user_id is not None and user_id == self._turn_user_id:
-                self._same_sender_interrupted = True
         # P6: inbound from her (chat_id matches the authorized recipient) drives
         # watch-reply + morning flag-pull kicks. Any other chat is ignored here.
         # `text` = her reply body, threaded into the reply kick so the wakeup
@@ -875,8 +977,7 @@ class TgLoop:
         text = update.message.text.strip()
         if not text:
             return
-        uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid, text=text,
+        self._track(context.bot, update.message.chat_id, text=text,
                      msg_date=update.message.date)
 
         action, ack = self._registry.dispatch(text)
@@ -905,7 +1006,7 @@ class TgLoop:
         meta = _chat_meta(update.message)
         full = f"{meta}{quote_prefix}{text}" if meta else f"{quote_prefix}{text}"
         self._buffer.add(full)
-        logger.debug("buffered text: %r (len=%d)", text[:80], len(self._buffer))
+        logger.info("inbound: %r (len=%d)", text[:60], len(text))
         if update.message:
             self._msg_id_cache[update.message.message_id] = text
             if len(self._msg_id_cache) > 50:
@@ -914,8 +1015,7 @@ class TgLoop:
     async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or not update.message.photo:
             return
-        uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid,
+        self._track(context.bot, update.message.chat_id,
                      text=update.message.caption or "",
                      msg_date=update.message.date, media_type="photo")
         paths = await materialize_photo(context.bot, update.message, self._cfg.data_dir)
@@ -930,8 +1030,7 @@ class TgLoop:
     async def on_animation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or not update.message.animation:
             return
-        uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid,
+        self._track(context.bot, update.message.chat_id,
                      text=update.message.caption or "",
                      msg_date=update.message.date, media_type="animation")
         path = await materialize_animation(context.bot, update.message, self._cfg.data_dir)
@@ -946,8 +1045,7 @@ class TgLoop:
     async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or not update.message.document:
             return
-        uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid,
+        self._track(context.bot, update.message.chat_id,
                      text=update.message.caption or "",
                      msg_date=update.message.date, media_type="document")
         path = await materialize_document(context.bot, update.message, self._cfg.data_dir)
@@ -962,8 +1060,7 @@ class TgLoop:
     async def on_sticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or not update.message.sticker:
             return
-        uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid,
+        self._track(context.bot, update.message.chat_id,
                      msg_date=update.message.date, media_type="sticker")
         path = await materialize_sticker(context.bot, update.message, self._cfg.data_dir)
         if path:
@@ -977,8 +1074,7 @@ class TgLoop:
     async def on_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or not update.message.video:
             return
-        uid = update.message.from_user.id if update.message.from_user else None
-        self._track(context.bot, update.message.chat_id, uid,
+        self._track(context.bot, update.message.chat_id,
                      text=update.message.caption or "",
                      msg_date=update.message.date, media_type="video")
         path = await materialize_video(context.bot, update.message, self._cfg.data_dir)
@@ -1027,14 +1123,11 @@ class TgLoop:
             return
         bot = self._bot or context.bot
         chat_id = self._pending_chat_id
-        self._turn_user_id = self._pending_user_id
-        self._same_sender_interrupted = False
         body = self._buffer.flush()
         if not body:
-            self._turn_user_id = None
             return
 
-        logger.debug("flush: %r", body[:120])
+        logger.info("flush: %r", body[:120])
         typing = TypingAction(bot, chat_id)
 
         async with self._lock:
@@ -1042,17 +1135,15 @@ class TgLoop:
                 # Retry-once: on a mid-turn stall/death, respawn resuming the
                 # same sid and re-send the SAME body ONCE. Second failure ->
                 # user-facing notice. Bridges emit outbound only from completed
-                # events, so a retried turn double-sends nothing; any partially
-                # flushed stream bubble is abandoned (stream_msg_id reset below).
+                # events, so a retried turn double-sends nothing.
                 response = thinking = None
-                stream_msg_id = None
                 for attempt in range(2):
                     try:
                         self.ensure_provider()
                         assert self._provider is not None
                         typing.start()
                         await asyncio.to_thread(self._provider.send, body)
-                        response, thinking, stream_msg_id = await self._stream_response(bot, chat_id, typing)
+                        response, thinking = await self._stream_response(bot, chat_id, typing)
                         if self._provider and self._provider.session_id:
                             if self._state.session_id != self._provider.session_id:
                                 self._state.session_id = self._provider.session_id
@@ -1085,8 +1176,6 @@ class TgLoop:
                             await self._send_provider_notice(bot, chat_id, "provider.gave_up")
                             return
                         if attempt == 0:
-                            # Abandon any partial stream bubble; retry cleanly.
-                            stream_msg_id = None
                             continue
                         # Second failure: hand back to the buffer + notice.
                         self._buffer.prepend(body)
@@ -1094,21 +1183,14 @@ class TgLoop:
                         return
             except (TimedOut, NetworkError) as e:
                 logger.warning("network error during turn processing: %s", e)
-                if stream_msg_id is None:
-                    # Nothing delivered yet — safe to retry the same body next flush,
-                    # but only once: unbounded retries would keep re-feeding the
-                    # provider (burning tokens) and can deliver duplicate replies
-                    # during sustained degradation.
-                    if self._net_retry_count < 1:
-                        self._net_retry_count += 1
-                        self._buffer.prepend(body)
-                    else:
-                        logger.error(
-                            "turn abandoned after network retry (chat_id=%s): %r",
-                            chat_id, body[:120],
-                        )
-                # else: a stream bubble already reached Telegram; the timeout was
-                # on the response, not the send — don't retry (would double-send).
+                if self._net_retry_count < 1:
+                    self._net_retry_count += 1
+                    self._buffer.prepend(body)
+                else:
+                    logger.error(
+                        "turn abandoned after network retry (chat_id=%s): %r",
+                        chat_id, body[:120],
+                    )
                 return
             except Exception as e:
                 logger.error("unexpected error: %s", e)
@@ -1125,31 +1207,20 @@ class TgLoop:
         ):
             await self._send_provider_notice(bot, chat_id, "provider.turn_capped")
 
-        # Pre-send merge: only if the SAME sender sent new messages while thinking.
-        # Other users' messages (group chat) never interrupt the current reply.
-        if self._same_sender_interrupted:
-            if stream_msg_id is None:
-                # Still thinking — no bubble visible. Safe to merge.
-                merged = f"{_MERGE_NOTE}\n{body}" if body else ""
-                self._buffer.prepend(merged)
-                logger.info("pre-send merge (thinking): reply dropped, %d chars re-queued", len(body))
-                self._turn_user_id = None
-                return
-            # Bubble already visible — deliver normally. New messages queued for next flush.
-            logger.info("same sender new inbound during streaming — delivering reply, new messages queued")
-        self._turn_user_id = None
+        # Reply always ships. Messages that arrived mid-turn stayed in the
+        # InboundBuffer (never drained) and become the next turn — no merge,
+        # no reply-drop.
+        await self._deliver_reply(bot, chat_id, response, thinking)
 
-        await self._deliver_reply(bot, chat_id, response, thinking, stream_msg_id)
 
     async def _deliver_reply(
-        self,
-        bot: Bot,
-        chat_id: int,
-        response: str,
-        thinking: str,
-        stream_msg_id: int | None,
+        self, bot: Bot, chat_id: int, response: str, thinking: str
     ) -> None:
-        """Send a completed provider response to the chat."""
+        """Send one completed turn (thinking blockquote + quote-tag resolution
+        + split + media + retry/fallback). Shared by the solicited reply path
+        and unsolicited (background-task) turns so both deliver identically."""
+        if not response and not thinking:
+            return
         # HTML-comment silence protocol: strip all <!-- ... --> before delivering.
         response = strip_html_comments(response)
 
@@ -1165,11 +1236,6 @@ class TgLoop:
                 logger.warning("thinking bubble send failed: %s", e)
 
         if not response:
-            if stream_msg_id is not None:
-                try:
-                    await bot.delete_message(chat_id=chat_id, message_id=stream_msg_id)
-                except Exception:
-                    pass
             return
 
         reply_to_id = None
@@ -1181,52 +1247,12 @@ class TgLoop:
                 if fragment.lower() in msg_text.lower():
                     reply_to_id = msg_id
                     break
-            if stream_msg_id is not None and reply_to_id is not None:
-                try:
-                    await bot.delete_message(chat_id=chat_id, message_id=stream_msg_id)
-                except Exception:
-                    pass
-                stream_msg_id = None
 
         bubbles = split_for_tg_typed(response)
-        text_bubbles = [b for b in bubbles if b["kind"] == "text"]
-
-        # Edit streaming preview in-place to first bubble, then append the rest.
-        # If the final handoff edit fails entirely, fall through and send bubble 0
-        # as a fresh message instead of silently dropping it.
-        skip_first_text = False
-        if stream_msg_id is not None and text_bubbles:
-            first = text_bubbles[0]["text"]
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=stream_msg_id,
-                    text=gfm_to_tg_html(first), parse_mode="HTML",
-                )
-                skip_first_text = True
-            except Exception as html_exc:
-                if "message is not modified" in str(html_exc).lower():
-                    # Preview already matches bubble 0 — already delivered, not a failure.
-                    skip_first_text = True
-                else:
-                    try:
-                        await bot.edit_message_text(
-                            chat_id=chat_id, message_id=stream_msg_id, text=first,
-                        )
-                        skip_first_text = True
-                    except Exception as plain_exc:
-                        if "message is not modified" in str(plain_exc).lower():
-                            skip_first_text = True
-                        else:
-                            logger.warning(
-                                "stream final edit failed — re-sending bubble 0 as new message"
-                            )
 
         total = len(bubbles)
         for idx, bubble in enumerate(bubbles):
             if bubble["kind"] == "text":
-                if skip_first_text:
-                    skip_first_text = False
-                    continue
                 send_kwargs = dict(
                     chat_id=chat_id,
                     text=gfm_to_tg_html(bubble["text"]),
@@ -1272,32 +1298,5 @@ class TgLoop:
                 if reply_to_id is not None:
                     reply_to_id = None
             await asyncio.sleep(_SEND_GAP_SEC)
-
-    async def check_autonomous_turn(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """PTB job: drain and deliver any autonomous provider turn (no inbound send)."""
-        if self._lock.locked():
-            return
-        if self._provider is None or not getattr(self._provider, "is_alive", lambda: False)():
-            return
-        if not getattr(self._provider, "has_complete_turn", lambda: False)():
-            return
-        try:
-            async with self._lock:
-                if not getattr(self._provider, "has_complete_turn", lambda: False)():
-                    return
-                try:
-                    response, thinking = await asyncio.wait_for(
-                        asyncio.to_thread(self._drain_recv),
-                        timeout=_AUTONOMOUS_DRAIN_TIMEOUT,
-                    )
-                except asyncio.TimeoutError:
-                    logger.error("autonomous drain timeout — respawning provider")
-                    self._respawn()
-                    return
-            if self._pending_chat_id is None:
-                logger.info("autonomous turn drained but no pending_chat_id — turn consumed")
-                return
-            bot = self._bot or context.bot
-            await self._deliver_reply(bot, self._pending_chat_id, response, thinking, None)
-        except ProviderDeadError as e:
-            logger.error("autonomous turn: provider dead: %s", e)
+        else:
+            logger.info("reply delivered: %d bubble(s)", total)

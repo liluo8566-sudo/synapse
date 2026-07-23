@@ -122,7 +122,7 @@ class CodexProvider(Provider):
             cmd += ["-"]
         return cmd
 
-    def recv(self) -> Iterator[dict[str, Any]]:
+    def recv(self, first_line: str | None = None) -> Iterator[dict[str, Any]]:
         if not self.alive:
             raise ProviderDeadError("provider not alive")
         if self._pending_msg is None:

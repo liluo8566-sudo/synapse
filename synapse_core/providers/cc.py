@@ -69,6 +69,9 @@ _DEFAULT_TOOL_IDLE_HARD_S = 1800.0
 # window size and would false-trigger every turn).
 _DEFAULT_TURN_OUTPUT_CAP = 20000
 
+# poll_line sentinel: the reader thread put None (EOF) while the caller was
+# polling idle. Distinct from None (no event within timeout).
+POLL_EOF = object()
 # E-polish outbound quote v3: teach cc the bridge-specific <quote> protocol.
 # Injected once per session via --append-system-prompt so cc emits the tag
 # at bubble-heads when it intends to quote-reply, and never as filler text.
@@ -374,7 +377,28 @@ class ClaudeCodeProvider(Provider):
                         )
                 continue
 
-    def recv(self) -> Iterator[dict[str, Any]]:
+    def poll_line(self, timeout: float) -> Any:
+        """Non-blocking-ish read of ONE parsed event for the idle listener.
+
+        No liveness clock: idle silence between turns is normal and unbounded,
+        so this never kills the process (unlike _next_event). Returns:
+        - the event dict when one is available within `timeout`,
+        - None when the queue stayed empty (still idle),
+        - POLL_EOF when the reader thread put the EOF sentinel (None); sets
+          self.alive = False so the caller marks the provider dead.
+        """
+        try:
+            item = self._event_queue.get(timeout=max(0.0, timeout))
+        except queue.Empty:
+            return None
+        if item is None:
+            self.alive = False
+            # Re-enqueue so subsequent callers also see EOF immediately.
+            self._event_queue.put(None)
+            return POLL_EOF
+        return item
+
+    def recv(self, first_line: str | None = None) -> Iterator[dict[str, Any]]:
         if not self.alive or self.process is None:
             raise ProviderDeadError("subprocess not alive")
         # Reset per-turn output-cap state at the start of every send->result
@@ -383,8 +407,16 @@ class ClaudeCodeProvider(Provider):
         self._turn_output_by_request = {}
         self._pending_tool_ids = set()
         saw_result = False
+        # first_line: an event dict already pulled off the queue by the idle
+        # listener's poll_line. Process it before reading the queue so the
+        # turn it opened is not lost.
+        pending_first = first_line
         while True:
-            ev = self._next_event()
+            if pending_first is not None:
+                ev: dict[str, Any] | None = pending_first  # type: ignore[assignment]
+                pending_first = None
+            else:
+                ev = self._next_event()
             if ev is None:
                 # EOF sentinel: re-enqueue so subsequent recv() callers also
                 # get it immediately rather than blocking forever.

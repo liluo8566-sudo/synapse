@@ -12,6 +12,7 @@ from pathlib import Path
 
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, MessageHandler, filters
+from telegram.request import HTTPXRequest
 
 from synapse_core import marrow_session
 from synapse_core.alerts import AlertSink
@@ -244,14 +245,35 @@ def main() -> int:
 
     idle_loop.start()
 
+    # HTTPX timeouts. get_updates uses a separate request; its read timeout must
+    # stay above the long-poll timeout (PTB default 10s) so a poll never times
+    # out client-side before the server returns.
+    _timeouts = dict(
+        connect_timeout=cfg.http_connect_timeout_s,
+        read_timeout=cfg.http_read_timeout_s,
+        write_timeout=cfg.http_write_timeout_s,
+        pool_timeout=cfg.http_pool_timeout_s,
+    )
+    # Resident idle listener: drains unsolicited (background-task) turns while
+    # no send is pending so they deliver on completion instead of mispairing.
+    listener_box: dict = {"task": None}
+
+    async def _post_init(application) -> None:
+        listener_box["task"] = application.create_task(loop._idle_listener())
+
+    async def _post_shutdown(application) -> None:
+        loop.stop_listener()
+        task = listener_box["task"]
+        if task is not None:
+            task.cancel()
+
     app = (
         Application.builder()
         .token(cfg.bot_token)
-        .connect_timeout(10.0)
-        .read_timeout(20.0)
-        .write_timeout(20.0)
-        .pool_timeout(10.0)
-        .media_write_timeout(60.0)
+        .request(HTTPXRequest(**_timeouts))
+        .get_updates_request(HTTPXRequest(**_timeouts))
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
         .build()
     )
     app.add_handler(MessageHandler(filters.TEXT, loop.on_message))
@@ -263,8 +285,6 @@ def main() -> int:
     app.job_queue.run_repeating(loop.check_flush, interval=0.5, first=0.5)
     app.job_queue.run_repeating(loop.check_heartbeat, interval=15, first=10)
     app.job_queue.run_repeating(loop.check_qidu_signal, interval=cfg.qidu_signal_poll_interval, first=5)
-    app.job_queue.run_repeating(loop.check_autonomous_turn, interval=3, first=5)
-
     if cfg.chat_id is None:
         logger.warning("outbox: [tg].chat_id not set — outbound note delivery disabled")
     else:
