@@ -48,3 +48,5 @@ def configure_logging(log_path: Path) -> None:
     root.addHandler(file_handler)
     root.addHandler(stream_handler)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
