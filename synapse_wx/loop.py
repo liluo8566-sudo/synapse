@@ -1282,7 +1282,7 @@ class MainLoop:
                 try:
                     self._listen_once()
                 except Exception as e:  # never let the listener die
-                    logger.warning("idle listener iteration error: %s", e)
+                    logger.warning("idle listener iteration error: %s", e, exc_info=True)
             # Sleep OUTSIDE the lock so a pending maybe_flush wins it.
             self._sleeper(_LISTEN_RELEASE_SLEEP_SEC)
         logger.info("idle listener stopped")
@@ -1348,26 +1348,22 @@ class MainLoop:
                     except Exception as e:
                         logger.warning("listen typing stop failed: %s", e)
 
-    def _consume_non_turn_line(self, line: str) -> bool:
-        """Classify a first polled line; True when it opens NO turn and was
-        consumed here (no typing, no blocking recv).
+    def _consume_non_turn_line(self, line: dict) -> bool:
+        """Classify a first polled event dict; True when it opens NO turn and
+        was consumed here (no typing, no blocking recv).
+
+        poll_line returns already-parsed dicts (the reader thread pre-parses
+        JSON), so no strip/json.loads is needed here.
 
         Every cc spawn (fresh or --resume) emits a system{init} handshake as
-        its first stdout line. It carries no result event, so feeding it to
+        its first event. It carries no result event, so feeding it to
         _collect_turn blocks recv until idle_hard_s and then SIGKILLs the fresh
         process — while typing pings the chat the whole time. Handle the
-        handshake's state here instead; only a task_notification-first line is
+        handshake's state here instead; only a task_notification-first event is
         a real unsolicited turn."""
-        stripped = line.strip()
-        if not stripped:
-            return True
-        try:
-            ev = json.loads(stripped)
-        except ValueError:
-            logger.warning("idle listener: skip non-json line: %s", line[:120])
-            return True
+        ev = line  # poll_line already returns a parsed dict
         if not isinstance(ev, dict):
-            logger.warning("idle listener: skip non-object line: %s", line[:120])
+            logger.warning("idle listener: skip non-object event: %s", repr(ev)[:120])
             return True
         if _is_unsolicited_first_event(ev):
             return False

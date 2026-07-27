@@ -8,7 +8,6 @@ an exception and re-reads self._provider every iteration.
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -33,22 +32,25 @@ class FakeBot:
 
 
 def _turn_lines(text, *, unsolicited=True, sid="sid-x"):
-    lines = []
+    """Return a list of already-parsed event dicts, mirroring what poll_line
+    returns (the reader thread pre-parses JSON into dicts)."""
+    events = []
     if unsolicited:
-        lines.append(json.dumps({"type": "system", "subtype": "task_notification"}))
-    lines.append(json.dumps({"type": "system", "subtype": "init", "session_id": sid}))
-    lines.append(json.dumps({"type": "assistant",
-                             "message": {"content": [{"type": "text", "text": text}]}}))
-    lines.append(json.dumps({"type": "result", "result": text}))
-    return lines
+        events.append({"type": "system", "subtype": "task_notification"})
+    events.append({"type": "system", "subtype": "init", "session_id": sid})
+    events.append({"type": "assistant",
+                   "message": {"content": [{"type": "text", "text": text}]}})
+    events.append({"type": "result", "result": text})
+    return events
 
 
 class QueueProvider:
-    """poll_line pops one line; recv(first_line) consumes first_line then the
-    queue until a result. Scripts a list of raw lines + POLL_EOF sentinels."""
+    """poll_line pops one event dict; recv(first_line) consumes first_line dict
+    then the queue until a result. Mirrors the real ClaudeCodeProvider contract:
+    the reader thread pre-parses JSON, so poll_line returns dicts, never strings."""
 
-    def __init__(self, lines: list) -> None:
-        self._lines = list(lines)
+    def __init__(self, events: list) -> None:
+        self._lines = list(events)
         self.alive = True
         self.session_id = None
         self.turn_output_capped = False
@@ -60,18 +62,19 @@ class QueueProvider:
         if item is POLL_EOF:
             self.alive = False
             return POLL_EOF
-        return item
+        return item  # already a dict
 
     def recv(self, first_line=None):
         if first_line is not None:
-            yield json.loads(first_line)
-            if json.loads(first_line).get("type") == "result":
+            ev0 = first_line  # already a dict (poll_line returns dicts)
+            yield ev0
+            if ev0.get("type") == "result":
                 return
         while self._lines:
             item = self._lines.pop(0)
             if item is POLL_EOF:
                 return
-            ev = json.loads(item)
+            ev = item  # already a dict
             yield ev
             if ev.get("type") == "result":
                 return
@@ -153,7 +156,7 @@ def test_init_handshake_does_not_start_typing_or_drain(tmp_path):
     loop._bot = bot
     loop._pending_chat_id = 123
     prov = NoRecvProvider(
-        [json.dumps({"type": "system", "subtype": "init", "session_id": "sid-new"})]
+        [{"type": "system", "subtype": "init", "session_id": "sid-new"}]
     )
     loop._provider = prov
     asyncio.run(loop._listen_once())
@@ -167,15 +170,15 @@ def test_init_handshake_does_not_start_typing_or_drain(tmp_path):
     assert bot.sent == []
 
 
-def test_non_turn_first_line_consumed_not_drained(tmp_path):
-    """A stray non-task_notification line (or garbage) is consumed, never
-    treated as the start of an unsolicited turn."""
+def test_non_turn_first_event_consumed_not_drained(tmp_path):
+    """A stray non-task_notification event dict is consumed without typing or
+    draining. Non-dict values (defensive check) also consumed with a warning."""
     loop = _loop(tmp_path)
     bot = FakeBot()
     loop._bot = bot
     loop._pending_chat_id = 123
     loop._provider = NoRecvProvider(
-        ["not json at all", json.dumps({"type": "stream_event"})]
+        [42, {"type": "stream_event"}]  # non-dict + stray event dict
     )
     asyncio.run(loop._listen_once())
     asyncio.run(loop._listen_once())
@@ -190,7 +193,7 @@ def test_handshake_before_unsolicited_turn_still_delivers(tmp_path):
     loop._bot = bot
     loop._pending_chat_id = 123
     lines = [
-        json.dumps({"type": "system", "subtype": "init", "session_id": "sid-new"})
+        {"type": "system", "subtype": "init", "session_id": "sid-new"}
     ] + _turn_lines("bg answer")
     loop._provider = QueueProvider(lines)
     asyncio.run(loop._listen_once())  # consumes the handshake only

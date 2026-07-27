@@ -9,8 +9,6 @@ TypingPing is stubbed so no real re-ping thread / real sleep runs.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from synapse_core.debounce import InboundBuffer
@@ -66,23 +64,30 @@ def one_bubble_split(monkeypatch):
     )
 
 
-def _turn_lines(text, *, unsolicited=True, sid="sid-x"):
-    lines = []
+def _turn_events(text, *, unsolicited=True, sid="sid-x"):
+    """Return a list of already-parsed event dicts, mirroring what poll_line
+    returns (the reader thread pre-parses JSON into dicts)."""
+    events = []
     if unsolicited:
-        lines.append(json.dumps({"type": "system", "subtype": "task_notification"}))
-    lines.append(json.dumps({"type": "system", "subtype": "init", "session_id": sid}))
-    lines.append(json.dumps({"type": "assistant",
-                             "message": {"content": [{"type": "text", "text": text}]}}))
-    lines.append(json.dumps({"type": "result", "result": text}))
-    return lines
+        events.append({"type": "system", "subtype": "task_notification"})
+    events.append({"type": "system", "subtype": "init", "session_id": sid})
+    events.append({"type": "assistant",
+                   "message": {"content": [{"type": "text", "text": text}]}})
+    events.append({"type": "result", "result": text})
+    return events
+
+
+# Keep old name as alias so individual tests don't need rewriting.
+_turn_lines = _turn_events
 
 
 class QueueProvider:
-    """poll_line pops one line; recv(first_line) consumes first_line then the
-    queue until a result. Scripts a list of raw lines + POLL_EOF sentinels."""
+    """poll_line pops one event dict; recv(first_line) consumes first_line dict
+    then the queue until a result. Mirrors the real ClaudeCodeProvider contract:
+    the reader thread pre-parses JSON, so poll_line returns dicts, never strings."""
 
-    def __init__(self, lines: list) -> None:
-        self._lines = list(lines)
+    def __init__(self, events: list) -> None:
+        self._lines = list(events)
         self.alive = True
         self.session_id = None
         self.turn_output_capped = False
@@ -95,11 +100,11 @@ class QueueProvider:
         if item is POLL_EOF:
             self.alive = False
             return POLL_EOF
-        return item
+        return item  # already a dict
 
     def recv(self, first_line=None):
         if first_line is not None:
-            ev0 = json.loads(first_line)
+            ev0 = first_line  # already a dict (poll_line returns dicts)
             yield ev0
             if ev0.get("type") == "result":
                 return
@@ -107,7 +112,7 @@ class QueueProvider:
             item = self._lines.pop(0)
             if item is POLL_EOF:
                 return
-            ev = json.loads(item)
+            ev = item  # already a dict
             yield ev
             if ev.get("type") == "result":
                 return
@@ -167,8 +172,8 @@ def test_init_handshake_does_not_start_typing_or_drain(tmp_path):
     idle_hard_s then SIGKILL the fresh process)."""
     loop = _loop(tmp_path)
     prov = NoRecvProvider(
-        [json.dumps({"type": "system", "subtype": "init",
-                     "session_id": "sid-new", "model": "opus"})]
+        [{"type": "system", "subtype": "init",
+          "session_id": "sid-new", "model": "opus"}]
     )
     loop._provider = prov
     loop._listen_once()
@@ -184,12 +189,18 @@ def test_init_handshake_does_not_start_typing_or_drain(tmp_path):
     assert loop._ilink.sent == []
 
 
-def test_non_turn_first_line_consumed_not_drained(tmp_path):
-    """A stray non-task_notification line (or garbage) is consumed, never
-    treated as the start of an unsolicited turn."""
+def test_non_turn_first_event_consumed_not_drained(tmp_path):
+    """A stray non-task_notification event dict (e.g. stream_event, a non-dict)
+    is consumed without typing or draining.
+
+    Note: raw strings can no longer arrive via poll_line — the reader thread
+    pre-parses JSON and skips bad lines before enqueueing. Only dicts reach here.
+    The non-dict guard in _consume_non_turn_line is a defensive belt-and-braces
+    check for future misuse, tested with a synthetic non-dict sentinel."""
     loop = _loop(tmp_path)
-    prov = NoRecvProvider(["not json at all",
-                           json.dumps({"type": "stream_event"})])
+    # A non-dict value (defensive check) and a stray stream_event dict.
+    prov = NoRecvProvider([42,  # non-dict: should be consumed with a warning
+                           {"type": "stream_event"}])
     loop._provider = prov
     loop._listen_once()
     loop._listen_once()
@@ -200,8 +211,8 @@ def test_non_turn_first_line_consumed_not_drained(tmp_path):
 def test_handshake_before_unsolicited_turn_still_delivers(tmp_path):
     """A handshake queued ahead of a real unsolicited turn must not eat it."""
     loop = _loop(tmp_path)
-    lines = [json.dumps({"type": "system", "subtype": "init",
-                         "session_id": "sid-new"})] + _turn_lines("bg answer")
+    lines = [{"type": "system", "subtype": "init",
+              "session_id": "sid-new"}] + _turn_lines("bg answer")
     loop._provider = QueueProvider(lines)
     loop._listen_once()  # consumes the handshake only
     assert loop._ilink.sent == []
@@ -298,3 +309,40 @@ def test_provider_swapped_mid_poll_picked_up_next_iteration(tmp_path):
     loop._provider = QueueProvider(_turn_lines("after swap"))
     loop._listen_once()
     assert [s[2] for s in loop._ilink.sent] == ["after swap"]
+
+
+# ── Regression: poll_line returns dicts, not strings ──────────────────────────
+
+def test_poll_line_returns_dict_not_str_regression(tmp_path):
+    """Regression: poll_line returns already-parsed dicts (the reader thread
+    pre-parses JSON before enqueueing). _consume_non_turn_line must accept a
+    dict directly and MUST NOT call .strip() or json.loads() on it.
+
+    Before the fix this raised:
+        AttributeError: 'dict' object has no attribute 'strip'
+    repeating on every idle listener iteration.
+    """
+    loop = _loop(tmp_path)
+    # Feed a raw dict init handshake — exactly what ClaudeCodeProvider.poll_line
+    # returns after the upstream reader-thread change.
+    init_dict = {"type": "system", "subtype": "init", "session_id": "sid-dict"}
+    prov = NoRecvProvider([init_dict])
+    loop._provider = prov
+
+    # Must not raise; must consume the handshake cleanly.
+    loop._listen_once()
+
+    assert loop._ilink.typing == 0
+    assert loop._ilink.sent == []
+    assert loop.state.session_id == "sid-dict"
+
+
+def test_poll_line_dict_unsolicited_turn_delivered(tmp_path):
+    """End-to-end: an unsolicited turn delivered as pre-parsed dicts (matching
+    the real poll_line contract) is collected and sent without error."""
+    loop = _loop(tmp_path)
+    # _turn_events already returns dicts; verify the full path end-to-end.
+    loop._provider = QueueProvider(_turn_events("hello from dict turn"))
+    loop._listen_once()
+    assert [s[2] for s in loop._ilink.sent] == ["hello from dict turn"]
+    assert loop._ilink.typing >= 1
