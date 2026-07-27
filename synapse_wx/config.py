@@ -34,6 +34,9 @@ class Config:
     marrow_repo_cmd: str = ""
     cc_cwd: str = ""  # cwd cc subprocess spawns in; empty = $HOME
     user_name: str = ""  # [persona] display name for injected signal text
+    # Seeds BridgeState.model on a bridge that has never been switched. A
+    # persisted /model choice wins over it; empty = let cc pick its own.
+    default_model: str = ""
     # Provider liveness: seconds of continuous stream silence before the soft
     # liveness check (poll process) and the hard idle kill (stall -> respawn).
     idle_soft_s: float = 60.0
@@ -62,8 +65,10 @@ class Config:
     session_get_effort_command: str = "mw get-session-effort --sid {sid}"
     # created_at resolver: prints ISO timestamp for a sid, or empty on miss.
     session_created_command: str = "mw get-session-created --sid {sid}"
-    # B1: model /clear lands on (canonical id, "[1m]" suffix kept).
-    clear_default_model: str = "claude-opus-4-6[1m]"
+    # B1: model /clear lands on (canonical id, "[1m]" suffix kept). Empty =
+    # no fixed default — /clear follows whatever model the session was
+    # already on (registry.py falls back to `state.model`).
+    clear_default_model: str = ""
     # cc transcript dir for /resume jsonl fallback (and B7 history replay).
     cc_projects_dir: str = ""  # empty → ~/.claude/projects
     # B8: marrow.db path for the mm- / mm+ audit_log writer. Empty = bridge
@@ -82,7 +87,7 @@ class Config:
     outbox_retry_max: int = 3
 
     # Watch + kick (P6). kick_cmd = cortex.kick launcher (venv python + module).
-    # Empty = watch/kick off. Morning flag-pull reads night flag + morning_start.
+    # Empty = watch/kick off.
     outbox_kick_cmd: list | str | None = None
     outbox_kick_text_chars: int = 200
     outbox_receipt_text_chars: int = 120
@@ -90,10 +95,11 @@ class Config:
     # Marks a delivered note as bridge-sent (vs the resident session's own
     # chat), so her phone can tell them apart at a glance. Empty disables.
     outbox_note_prefix: str = "\U0001f4ee "
-    cortex_wake_state_file: str = ""
-    night_morning_start: str = "06:00"
-    timezone: str = "Australia/Melbourne"
+    # Empty = follow the OS timezone; set an IANA name to pin it.
+    timezone: str = ""
 
+    # /cwd presets from [cwd_presets] — digit -> absolute path
+    cwd_presets: dict | None = None
     # Ack string overrides from [ack_overrides] — key -> {style -> template}
     ack_overrides: dict | None = None
 
@@ -185,14 +191,6 @@ def load_config(path: Path | None = None) -> Config:
             cfg.outbox_kick_media_placeholder = kmp
         if "note_prefix" in outbox and isinstance(outbox["note_prefix"], str):
             cfg.outbox_note_prefix = outbox["note_prefix"]
-    cortex = data.get("cortex") or {}
-    if isinstance(cortex, dict):
-        ws = cortex.get("wake_state_file")
-        if isinstance(ws, str):
-            cfg.cortex_wake_state_file = ws
-        ms = cortex.get("morning_start")
-        if isinstance(ms, str) and ms.strip():
-            cfg.night_morning_start = ms
     core = data.get("core") or {}
     if isinstance(core, dict) and isinstance(core.get("timezone"), str):
         cfg.timezone = core["timezone"]
@@ -221,6 +219,9 @@ def load_config(path: Path | None = None) -> Config:
         storm = provider.get("unsolicited_storm_cap")
         if isinstance(storm, int) and not isinstance(storm, bool) and storm >= 0:
             cfg.unsolicited_storm_cap = storm
+        model = provider.get("default_model")
+        if isinstance(model, str) and model:
+            cfg.default_model = model
     session = data.get("session") or {}
     if isinstance(session, dict):
         for field_name in (
@@ -238,6 +239,9 @@ def load_config(path: Path | None = None) -> Config:
                 val = session[field_name]
                 if isinstance(val, str):
                     setattr(cfg, field_name, val)
+    presets = data.get("cwd_presets") or {}
+    if isinstance(presets, dict):
+        cfg.cwd_presets = {str(k): str(v) for k, v in presets.items() if isinstance(v, str)}
     ack = data.get("ack_overrides") or {}
     if isinstance(ack, dict):
         cfg.ack_overrides = {

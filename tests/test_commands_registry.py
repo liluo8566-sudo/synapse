@@ -175,8 +175,8 @@ def test_model_raw_canonical_id_passes_through() -> None:
     reg, hooks, _ = _make(s)
     verdict, reply = reg.dispatch("/model claude-future-9")
     assert verdict == "handled"
-    # display fallback uses the id itself.
-    assert reply == "🤖(claude-future-9)上线中..."
+    # Rule-based display formats an unseen id with no table edit.
+    assert reply == "🤖(Future 9)上线中..."
     assert hooks.swap_calls == [("claude-future-9", None)]
 
 
@@ -226,12 +226,25 @@ def test_clear_resets_session() -> None:
     reg, hooks, _ = _make(s)
     verdict, reply = reg.dispatch("/clear")
     assert verdict == "handled"
-    # B1: /clear lands on the configured default (opus-4.6[1m]).
+    # clear_default_model empty (default): /clear follows the session's
+    # previous model instead of resetting to a fixed one.
     assert (reply or "").startswith("新鸭上桌")
-    assert "Opus 4.6 [1M]" in (reply or "")
-    assert hooks.swap_calls == [("claude-opus-4-6[1m]", None)]
+    assert "Opus 4.7" in (reply or "")
+    assert hooks.swap_calls == [("claude-opus-4-7", None)]
     assert hooks.forget_calls == 1
     assert s.session_id is None
+    assert s.model == "claude-opus-4-7"
+
+
+def test_clear_uses_configured_default_when_set() -> None:
+    """clear_default_model still pins a fixed model when explicitly set."""
+    s = BridgeState(model="claude-opus-4-7", session_id="sid-old")
+    reg, hooks, _ = _make(s)
+    reg._ctx.clear_default_model = "claude-opus-4-6[1m]"
+    verdict, reply = reg.dispatch("/clear")
+    assert verdict == "handled"
+    assert "Opus 4.6 [1M]" in (reply or "")
+    assert hooks.swap_calls == [("claude-opus-4-6[1m]", None)]
     assert s.model == "claude-opus-4-6[1m]"
 
 
@@ -241,7 +254,7 @@ def test_new_is_alias_for_clear() -> None:
     verdict, reply = reg.dispatch("/new")
     assert verdict == "handled"
     assert (reply or "").startswith("新鸭上桌")
-    assert hooks.swap_calls == [("claude-opus-4-6[1m]", None)]
+    assert hooks.swap_calls == [("claude-opus-4-7", None)]
     assert s.session_id is None
 
 
@@ -264,7 +277,7 @@ def test_clear_closes_old_sid() -> None:
     verdict, _ = reg.dispatch("/clear")
     assert verdict == "handled"
     assert hooks.close_calls == 1
-    assert hooks.swap_calls == [("claude-opus-4-6[1m]", None)]
+    assert hooks.swap_calls == [("claude-opus-4-7", None)]
     assert s.session_id is None
 
 
@@ -554,13 +567,15 @@ def test_cwd_bad_digit_returns_error() -> None:
 
 
 def test_cwd_arbitrary_path_accepted(tmp_path) -> None:
+    # clear_default_model empty (default) + no prior model on state → the
+    # implicit /clear swap carries None, same as a fresh session.
     s = BridgeState(cc_cwd="/Users/Gabrielle/Desktop/NY")
     reg, hooks, _ = _make(s)
     verdict, reply = reg.dispatch(f"/cwd {tmp_path}")
     assert verdict == "handled"
     assert reply is not None and tmp_path.name in reply
     assert s.cc_cwd == str(tmp_path.resolve())
-    assert hooks.swap_calls == [(reg._ctx.clear_default_model, None)]
+    assert hooks.swap_calls == [(None, None)]
 
 
 def test_cwd_arbitrary_path_missing_rejected() -> None:

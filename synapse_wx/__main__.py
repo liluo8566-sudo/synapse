@@ -117,6 +117,10 @@ def main() -> int:
     cfg = load_config()
     if cfg.ack_overrides:
         cmd_messages.load_overrides(cfg.ack_overrides)
+    # /cwd presets: config wins over the SYNAPSE_CWD_PRESETS env fallback.
+    if cfg.cwd_presets:
+        import synapse_core.commands.registry as _reg
+        _reg._CWD_PRESETS = tuple(v for _, v in sorted(cfg.cwd_presets.items()) if v)
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     pid_path = CONFIG_DIR / "synapse-wx.pid"
@@ -172,11 +176,11 @@ def main() -> int:
     for k, v in persisted.items():
         if hasattr(state, k):
             setattr(state, k, v)
-    # Fallback: a fresh persist file (or one written before any /swap) has
-    # model=null; without this, provider_factory passes no --model and cc
-    # uses its own default (currently opus-4-7), bypassing the WeChat default.
-    if state.model is None:
-        state.model = cfg.clear_default_model
+    # A persisted /model choice wins. Only a bridge that never switched falls
+    # back to the configured default; empty config default must NOT blank a
+    # freshly-None state.model into "" — leave it None so cc picks its own.
+    if not state.model:
+        state.model = cfg.default_model or cfg.clear_default_model or None
 
     def _save_state() -> None:
         bridge_state_store.save(BRIDGE_STATE_PATH, asdict(state))
@@ -253,6 +257,7 @@ def main() -> int:
         ilink=ilink,
         provider_factory=provider_factory,
         state=state,
+        persist_state=_save_state,
         sessions=sessions,
         idle_loop=idle_loop,
         buffer=buffer,
@@ -325,10 +330,10 @@ def main() -> int:
     _DIARY_SCRIPT = "\n".join([
         "import sys,json",
         "from datetime import datetime,timedelta",
-        "from zoneinfo import ZoneInfo",
+        "from marrow.config import get_tz",
         "from marrow.timecue import parse_time_cue",
         "from marrow.daemon import recall",
-        "_m=ZoneInfo('Australia/Melbourne')",
+        "_m=get_tz()",
         "cue=parse_time_cue(sys.stdin.read().strip(),datetime.now(_m))",
         "if not cue:print('null');sys.exit(0)",
         "s=datetime.fromisoformat(cue.since_utc).astimezone(_m).strftime('%Y-%m-%d')",

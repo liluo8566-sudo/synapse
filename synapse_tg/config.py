@@ -19,7 +19,9 @@ class TgConfig:
     data_dir: Path = field(default_factory=lambda: Path.home() / ".config" / "synapse-tg")
     marrow_bridge: bool = False
     cwd: Path | None = None
-    default_model: str = "claude-opus-4-6[1m]"
+    # Seeds BridgeState.model on a bridge that has never been switched. A
+    # persisted /model choice wins over it; empty = let cc pick its own.
+    default_model: str = ""
 
     # Provider liveness: seconds of continuous stream silence before the soft
     # liveness check (poll process) and the hard idle kill (stall -> respawn).
@@ -65,9 +67,13 @@ class TgConfig:
     outbox_poll_interval_s: float = 5.0
     outbox_retry_max: int = 3
 
+    # Inbound sender whitelist (by Telegram user id). Empty = accept-all (open
+    # door, logged loudly at startup). Explicit allowed_user_ids wins over the
+    # chat_id fallback (private chats: chat_id == user_id).
+    allowed_user_ids: list = field(default_factory=list)
+
     # Watch + kick (P6). kick_cmd = cortex.kick launcher (venv python + module),
     # e.g. ["/path/.venv/bin/python", "-m", "cortex.kick"]. Empty = watch/kick off.
-    # Morning flag-pull reads the cortex night flag + morning_start.
     outbox_kick_cmd: list = field(default_factory=list)
     outbox_kick_text_chars: int = 200
     outbox_receipt_text_chars: int = 120
@@ -75,9 +81,36 @@ class TgConfig:
     # Marks a delivered note as bridge-sent (vs the resident session's own
     # chat), so her phone can tell them apart at a glance. Empty disables.
     outbox_note_prefix: str = "\U0001f4ee "
-    cortex_wake_state_file: str = ""
-    night_morning_start: str = "06:00"
-    timezone: str = "Australia/Melbourne"
+    # Empty = follow the OS timezone; set an IANA name to pin it.
+    timezone: str = ""
+
+    # Cortex shell (T9). Active iff shell_id is a member of marrow's
+    # [cortex].shells (T7: single source, see shell_active()) — no local
+    # enable flag. Inactive = the resident is a plain relay, exactly as
+    # before: no scheduler task, no silence cycle, no MARROW_CORTEX env.
+    shell_id: str = "tg"
+    # Ledger shared with marrow (<dir>/<shell>.json) + kick socket. Keep the
+    # socket path SHORT: macOS caps an AF_UNIX path at 104 bytes.
+    shell_state_dir: str = "~/.config/marrow/state/shells"
+    shell_socket: str = "~/.config/marrow/state/shells/tg.sock"
+    # Minutes of user silence before one rendered note turn is fed in.
+    shell_idle_min: float = 20.0
+    # argv rendering the wakeup note on stdout, e.g.
+    # ["/path/cortex/.venv/bin/python", "-m", "cortex.note_render"].
+    # Empty = the silence cycle logs and skips every round.
+    shell_note_render_cmd: list = field(default_factory=list)
+    shell_note_render_timeout_s: float = 20.0
+    # Machine tag opening a fed turn (must be a marrow [cortex].machine_markers
+    # member, else the fed note reads as a real user message).
+    shell_note_tag: str = "⏳ [NEW ROUND]"
+    # Context occupancy at which the resident is asked to wrap up and is then
+    # respawned fresh. 0 disables the fuse.
+    shell_fuse_tokens: int = 180000
+    shell_fuse_tag: str = "⚙️ [FUSE]"
+    shell_fuse_prompt_text: str = (
+        "Session context fused. Update handoff before rotate. Add todo if any. "
+        "lie_down(rotate=True)"
+    )
 
     # CWD presets
     cwd_presets: dict = field(default_factory=dict)
@@ -93,6 +126,43 @@ class TgConfig:
     qidu_extract_script: str = "~/workshop/qidu/local/extract_book.py"
     qidu_signal_poll_interval: float = 5.0
     qidu_notebook_dir: str = ""
+
+    def shell_socket_path(self) -> Path:
+        return Path(self.shell_socket).expanduser()
+
+    def marrow_config_dir(self) -> Path:
+        """The shared marrow config/state dir (parent of marrow.db). Home of
+        config.toml, breaker.json and fuse_events.json — the cross-repo
+        protocol files marrow, cortex and this bridge all read."""
+        return Path(self.marrow_db).expanduser().parent
+
+    def shell_active(self) -> bool:
+        """Is `shell_id` listed in marrow's [cortex].shells (T7: single
+        source, resolved via marrow_config_dir — same file cortex's
+        shell_enabled() reads)? Missing/unreadable marrow config or missing
+        key -> shell off (standalone-synapse fallback)."""
+        p = self.marrow_config_dir() / "config.toml"
+        try:
+            if p.is_file():
+                data = tomllib.loads(p.read_bytes().decode("utf-8"))
+                shells = (data.get("cortex") or {}).get("shells")
+                if isinstance(shells, list):
+                    return self.shell_id.strip().lower() in [
+                        str(s).strip().lower() for s in shells
+                    ]
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, TypeError) as e:
+            logger.warning("shell_active: marrow config read failed (%s) — shell off", e)
+        return False
+
+    def effective_allowed_user_ids(self) -> list[int]:
+        """Whitelist actually enforced: allowed_user_ids if set, else
+        [chat_id] if set (private chats: chat_id == user_id), else empty
+        (accept-all)."""
+        if self.allowed_user_ids:
+            return list(self.allowed_user_ids)
+        if self.chat_id is not None:
+            return [self.chat_id]
+        return []
 
 
 def load_config(path: Path | None = None) -> TgConfig:
@@ -117,6 +187,11 @@ def load_config(path: Path | None = None) -> TgConfig:
         cid = tg.get("chat_id")
         if isinstance(cid, int) and not isinstance(cid, bool):
             cfg.chat_id = cid
+        aui = tg.get("allowed_user_ids")
+        if isinstance(aui, list):
+            cfg.allowed_user_ids = [
+                x for x in aui if isinstance(x, int) and not isinstance(x, bool)
+            ]
 
     outbox = data.get("outbox") or {}
     if isinstance(outbox, dict):
@@ -145,12 +220,33 @@ def load_config(path: Path | None = None) -> TgConfig:
 
     cortex = data.get("cortex") or {}
     if isinstance(cortex, dict):
-        ws = cortex.get("wake_state_file")
-        if isinstance(ws, str):
-            cfg.cortex_wake_state_file = ws
-        ms = cortex.get("morning_start")
-        if isinstance(ms, str) and ms.strip():
-            cfg.night_morning_start = ms
+        if "shell_enabled" in cortex:
+            logger.warning(
+                "[cortex] shell_enabled is ignored — shell activity is now "
+                "driven by marrow's [cortex].shells only")
+        for key, attr in (
+            ("shell_id", "shell_id"),
+            ("shell_state_dir", "shell_state_dir"),
+            ("shell_socket", "shell_socket"),
+            ("shell_note_tag", "shell_note_tag"),
+            ("fuse_tag", "shell_fuse_tag"),
+            ("fuse_prompt_text", "shell_fuse_prompt_text"),
+        ):
+            v = cortex.get(key)
+            if isinstance(v, str) and v.strip():
+                setattr(cfg, attr, v)
+        im = cortex.get("shell_idle_min")
+        if isinstance(im, (int, float)) and not isinstance(im, bool) and im > 0:
+            cfg.shell_idle_min = float(im)
+        rc = cortex.get("note_render_cmd")
+        if isinstance(rc, list):
+            cfg.shell_note_render_cmd = [str(x) for x in rc]
+        rt = cortex.get("note_render_timeout_s")
+        if isinstance(rt, (int, float)) and not isinstance(rt, bool) and rt > 0:
+            cfg.shell_note_render_timeout_s = float(rt)
+        ft = cortex.get("fuse_tokens")
+        if isinstance(ft, int) and not isinstance(ft, bool) and ft >= 0:
+            cfg.shell_fuse_tokens = ft
 
     core = data.get("core") or {}
     if isinstance(core, dict) and isinstance(core.get("timezone"), str):

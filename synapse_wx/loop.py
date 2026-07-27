@@ -36,7 +36,8 @@ from .split import (
     merge_bubbles_to_cap,
     split_for_wechat_typed,
 )
-from synapse_core.state import BridgeState
+from synapse_core.state import BridgeState, remember_resolved_model
+from synapse_core.text_clean import strip_tool_xml
 from .typing_ping import TypingPing
 
 logger = logging.getLogger(__name__)
@@ -136,10 +137,10 @@ class MainLoop:
         media_dir: Path = DEFAULT_MEDIA_DIR,
         persist_state: Callable[[], None] | None = None,
     ) -> None:
+        self._persist = persist_state
         self._ilink = ilink
         self._provider_factory = provider_factory
         self.state = state
-        self._persist_state = persist_state
         self._sessions = sessions
         self._idle_loop = idle_loop
         self._buffer = buffer if buffer is not None else InboundBuffer(clock=clock)
@@ -526,9 +527,8 @@ class MainLoop:
         )
 
     def _inbound_from_her(self, text: str = "", media_type: str = "") -> None:
-        """Her message landed on wx -> claim any armed watches on wx (one kick),
-        and morning flag-pull (night flag + past morning_start -> kick). Never
-        raises; no-ops without kick_cmd. Reply path claims instantly. `text` =
+        """Her message landed on wx -> claim any armed watches on wx (one kick).
+        Never raises; no-ops without kick_cmd. Reply path claims instantly. `text` =
         her reply body (iLink already merges a caption into the same text item),
         attached to the reply kick; `media_type` (e.g. "image") tags it as
         "[<type>] <caption>" when present, or "[<type>]" alone for a caption-less
@@ -558,10 +558,6 @@ class MainLoop:
                 note_id = ids[0] if len(ids) == 1 else ",".join(str(i) for i in ids)
                 cortex_kick.kick(kc, "reply", note_id=note_id, text=kick_text,
                                  text_chars=self._cfg.outbox_kick_text_chars)
-            if cortex_kick.night_mode(self._cfg.cortex_wake_state_file) and \
-                    cortex_kick.past_morning_start(
-                        self._cfg.night_morning_start, self._cfg.timezone):
-                cortex_kick.kick(kc, "morning")
         except Exception as e:
             logger.warning("inbound-from-her kick failed: %s", e)
 
@@ -1064,6 +1060,58 @@ class MainLoop:
 
     # ── recv drain ─────────────────────────────────────────────────
 
+    def _apply_init_event(self, ev: dict) -> None:
+        """Shared system(init) handling: adopt session_id, stamp created_at,
+        note cc's resolved model, record the session. Used by every turn drain
+        and by the idle listener when it consumes a bare spawn handshake."""
+        sid = ev.get("session_id")
+        if isinstance(sid, str) and sid:
+            # Stamp session_start_ts on sid change so /info reports
+            # current cc-session age, not the bridge process age.
+            if sid != self.state.session_id:
+                cfg = self._cfg
+                self._session_created_at = (
+                    get_session_created_at(cfg.session_created_command, sid)
+                    if cfg is not None
+                    else None
+                ) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.state.session_id = sid
+            if self._last_from_wxid:
+                try:
+                    self._sessions.set(self._last_from_wxid, sid)
+                except Exception as e:
+                    logger.warning("sessions.set failed: %s", e)
+        # cc reports the model it actually resolved (state.model may be a
+        # floating alias like "opus"). Display-only — mirrored onto the
+        # provider because the idle listener parses init events outside recv().
+        model = ev.get("model")
+        if not (isinstance(model, str) and model):
+            model = None
+        if model and self._provider is not None:
+            self._provider.model_actual = model
+            self._remember_resolved(model)
+        # B1: persist (sid, model) so /resume <sid> can recover later.
+        if isinstance(sid, str) and sid:
+            try:
+                self._record_session(sid, model or self.state.model)
+            except Exception as e:
+                logger.warning("record_session failed: %s", e)
+
+    def _remember_resolved(self, model_actual: str) -> None:
+        """Cache `--model <token>` -> cc's real id for later /clear + /model acks."""
+        prov = self._provider
+        token = getattr(prov, "model", None) or self.state.model
+        if remember_resolved_model(self.state, token, model_actual):
+            self._persist_state()
+
+    def _persist_state(self) -> None:
+        if self._persist is None:
+            return
+        try:
+            self._persist()
+        except Exception as e:
+            logger.warning("persist_state failed: %s", e)
+
     def _collect_turn(
         self, first_line: str | None = None
     ) -> tuple[str, str, bool] | None:
@@ -1094,34 +1142,7 @@ class MainLoop:
                 first_event = False
             t = ev.get("type")
             if t == "system" and ev.get("subtype") == "init":
-                sid = ev.get("session_id")
-                if isinstance(sid, str) and sid:
-                    # Stamp session_start_ts on sid change so /info reports
-                    # current cc-session age, not the bridge process age.
-                    if sid != self.state.session_id:
-                        cfg = self._cfg
-                        self._session_created_at = (
-                            get_session_created_at(cfg.session_created_command, sid)
-                            if cfg is not None
-                            else None
-                        ) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    self.state.session_id = sid
-                    if self._last_from_wxid:
-                        try:
-                            self._sessions.set(self._last_from_wxid, sid)
-                        except Exception as e:
-                            logger.warning("sessions.set failed: %s", e)
-                # Mirror cc-reported model (incl. "[1m]" suffix). Without this,
-                # /info shows "?" when bridge spawned without an explicit --model.
-                model = ev.get("model")
-                if isinstance(model, str) and model:
-                    self.state.model = model
-                # B1: persist (sid, model) so /resume <sid> can recover later.
-                if isinstance(sid, str) and sid:
-                    try:
-                        self._record_session(sid, self.state.model)
-                    except Exception as e:
-                        logger.warning("record_session failed: %s", e)
+                self._apply_init_event(ev)
             elif t == "assistant":
                 self._collect_assistant(ev, text_chunks, thinking_chunks)
             elif t == "stream_event":
@@ -1197,7 +1218,9 @@ class MainLoop:
                 if seg_type == "text":
                     txt = seg.get("text")
                     if isinstance(txt, str):
-                        sink.append(txt)
+                        cleaned = strip_tool_xml(txt)
+                        if cleaned:
+                            sink.append(cleaned)
                 elif seg_type == "thinking":
                     # Fallback: stream_event thinking_delta is preferred
                     # (fable needs it), but opus 4.x often only fills this
@@ -1208,7 +1231,9 @@ class MainLoop:
                         if isinstance(txt, str) and txt:
                             thinking_sink.append(txt)
         elif isinstance(content, str):
-            sink.append(content)
+            cleaned = strip_tool_xml(content)
+            if cleaned:
+                sink.append(cleaned)
         usage = message.get("usage")
         if isinstance(usage, dict):
             self._merge_usage(usage)
@@ -1292,8 +1317,12 @@ class MainLoop:
                 )
                 provider.alive = False
                 return
-            # A line means a full turn is arriving unsolicited. Target the last
-            # real chat; if none, drain-and-drop with a warning (never crash).
+            # Classify BEFORE reacting: only a line whose event opens a genuine
+            # unsolicited turn may start typing and enter the blocking drain.
+            if self._consume_non_turn_line(line):
+                return
+            # A real unsolicited turn is arriving. Target the last real chat;
+            # if none, drain-and-drop with a warning (never crash).
             with self._state_lock:
                 from_wxid = self._last_from_wxid
                 ctx_token = self._last_ctx_token
@@ -1319,20 +1348,59 @@ class MainLoop:
                     except Exception as e:
                         logger.warning("listen typing stop failed: %s", e)
 
+    def _consume_non_turn_line(self, line: str) -> bool:
+        """Classify a first polled line; True when it opens NO turn and was
+        consumed here (no typing, no blocking recv).
+
+        Every cc spawn (fresh or --resume) emits a system{init} handshake as
+        its first stdout line. It carries no result event, so feeding it to
+        _collect_turn blocks recv until idle_hard_s and then SIGKILLs the fresh
+        process — while typing pings the chat the whole time. Handle the
+        handshake's state here instead; only a task_notification-first line is
+        a real unsolicited turn."""
+        stripped = line.strip()
+        if not stripped:
+            return True
+        try:
+            ev = json.loads(stripped)
+        except ValueError:
+            logger.warning("idle listener: skip non-json line: %s", line[:120])
+            return True
+        if not isinstance(ev, dict):
+            logger.warning("idle listener: skip non-object line: %s", line[:120])
+            return True
+        if _is_unsolicited_first_event(ev):
+            return False
+        if ev.get("type") == "system" and ev.get("subtype") == "init":
+            self._apply_init_event(ev)
+            logger.info(
+                "idle listener: consumed spawn handshake (sid=%s)",
+                ev.get("session_id"),
+            )
+        else:
+            logger.warning(
+                "idle listener: dropped non-turn first event (type=%s subtype=%s)",
+                ev.get("type"), ev.get("subtype"),
+            )
+        return True
+
     def _drain_unsolicited(
         self, from_wxid: str, ctx_token: str, first_line: str
     ) -> None:
         """Collect and deliver the unsolicited turn opened by first_line, plus
-        any consecutive back-to-back turns already queued behind it."""
+        any consecutive back-to-back turns already queued behind it. Each
+        queued line is classified too: a non-turn line (spawn handshake) is
+        consumed without entering the blocking drain."""
         count = 0
         line: str | None = first_line
         while line is not None:
-            turn = self._collect_turn(first_line=line)
-            if turn is not None:
-                text, thinking, _unsolicited = turn
-                count += 1
-                self._maybe_storm_alert(count)
-                self._deliver_reply(from_wxid, ctx_token, text, thinking)
+            if not self._consume_non_turn_line(line):
+                turn = self._collect_turn(first_line=line)
+                if turn is not None:
+                    text, thinking, _unsolicited = turn
+                    count += 1
+                    self._maybe_storm_alert(count)
+                    self._deliver_reply(from_wxid, ctx_token, text, thinking)
             # Peek for the next queued turn without blocking on idle liveness.
             provider = self._provider
             if provider is None or not getattr(provider, "alive", False):
@@ -1461,6 +1529,7 @@ class MainLoop:
         return {
             "cc_pid": pid,
             "cwd": cwd,
+            "model_actual": getattr(prov, "model_actual", None),
             "ilink_ok": ilink_ok,
             "last_active_sid": self.state.session_id,
             "session_age_sec": session_age,

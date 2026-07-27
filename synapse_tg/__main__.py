@@ -33,6 +33,16 @@ logger = logging.getLogger(__name__)
 CHANNEL = "tg"
 
 
+def _whitelist_filter(cfg) -> "filters.BaseFilter | None":
+    """Build the sender gate from the effective whitelist (by Telegram user
+    id, so an allowed sender is recognised in a group too). None = accept-all
+    (caller must log a startup warning)."""
+    ids = cfg.effective_allowed_user_ids()
+    if not ids:
+        return None
+    return filters.User(user_id=set(ids))
+
+
 def main() -> int:
     configure_logging(Path.home() / ".config/marrow/logs/synapse-tg/synapse-tg.log")
     cfg = load_config()
@@ -177,7 +187,9 @@ def main() -> int:
             cc_projects_dir=cc_projects_dir,
             sid=sid,
         ),
-        clear_default_model=cfg.default_model,
+        # Empty on purpose: default_model only SEEDS a never-switched bridge.
+        # /clear must follow the saved state.model so a /model switch sticks.
+        clear_default_model="",
         list_recent_sessions=lambda: marrow_session.list_recent_sessions(
             session_list_recent_command=cfg.session_list_recent_command,
             cc_projects_dir=cc_projects_dir,
@@ -209,24 +221,12 @@ def main() -> int:
     loop._registry = Registry(ctx)
 
     # --- boot resume ---
-    # bridge_state.json (PERSISTED_KEYS) is authoritative; sessions.json
-    # is fallback only when state has no session_id (e.g. first boot).
-    if not state.session_id:
-        snap = sessions.snapshot()
-        if snap:
-            candidate = next(iter(snap.values()), None)
-            if candidate:
-                p_root = Path(cc_projects_dir)
-                if p_root.exists():
-                    has_jsonl = any(
-                        (p_root / d / f"{candidate}.jsonl").is_file()
-                        for d in os.listdir(str(p_root))
-                        if (p_root / d).is_dir()
-                    )
-                    if has_jsonl:
-                        state.session_id = candidate
-                        logger.info("boot resume (sessions.json fallback): sid=%s", candidate)
-    else:
+    # bridge_state.json (PERSISTED_KEYS) is the only source. No session_id
+    # means the last window was retired on purpose (rotate / clear / fuse) or
+    # this is a first boot — both start fresh. Never resurrect a sid from
+    # anywhere else: "state has no sid" is, in practice, only ever reached
+    # right after a deliberate retire.
+    if state.session_id:
         logger.info("boot resume (persisted): sid=%s", state.session_id)
 
     # --- start ---
@@ -257,15 +257,32 @@ def main() -> int:
     # Resident idle listener: drains unsolicited (background-task) turns while
     # no send is pending so they deliver on completion instead of mispairing.
     listener_box: dict = {"task": None}
+    # Cortex shell host (T9): scheduler task owning the silence cycle, wake
+    # ledger and token fuse. Absent unless shell_id is in marrow's
+    # [cortex].shells (T7, cfg.shell_active()).
+    shell_box: dict = {"host": None, "task": None}
 
     async def _post_init(application) -> None:
+        # Bridge-initiated rounds (shell note, unsolicited turn) must ship
+        # straight after a restart, before any inbound message arrives.
+        loop.attach_bot(application.bot)
         listener_box["task"] = application.create_task(loop._idle_listener())
+        if cfg.shell_active():
+            from .shell import ShellHost
+            host = ShellHost(cfg, loop)
+            shell_box["host"] = host
+            loop.attach_shell(host)
+            shell_box["task"] = application.create_task(host.run())
+            logger.info("cortex shell host started (shell=%s)", cfg.shell_id)
 
     async def _post_shutdown(application) -> None:
         loop.stop_listener()
-        task = listener_box["task"]
-        if task is not None:
-            task.cancel()
+        host = shell_box["host"]
+        if host is not None:
+            host.stop()
+        for task in (listener_box["task"], shell_box["task"]):
+            if task is not None:
+                task.cancel()
 
     app = (
         Application.builder()
@@ -276,12 +293,22 @@ def main() -> int:
         .post_shutdown(_post_shutdown)
         .build()
     )
-    app.add_handler(MessageHandler(filters.TEXT, loop.on_message))
-    app.add_handler(MessageHandler(filters.PHOTO, loop.on_photo))
-    app.add_handler(MessageHandler(filters.ANIMATION, loop.on_animation))
-    app.add_handler(MessageHandler(filters.Document.ALL, loop.on_document))
-    app.add_handler(MessageHandler(filters.Sticker.ALL, loop.on_sticker))
-    app.add_handler(MessageHandler(filters.VIDEO, loop.on_video))
+    whitelist = _whitelist_filter(cfg)
+    if whitelist is None:
+        logger.warning(
+            "tg bridge accepts inbound messages from ANY user — "
+            "set [tg].chat_id or [tg].allowed_user_ids to restrict"
+        )
+
+    def _gated(f):
+        return f if whitelist is None else whitelist & f
+
+    app.add_handler(MessageHandler(_gated(filters.TEXT), loop.on_message))
+    app.add_handler(MessageHandler(_gated(filters.PHOTO), loop.on_photo))
+    app.add_handler(MessageHandler(_gated(filters.ANIMATION), loop.on_animation))
+    app.add_handler(MessageHandler(_gated(filters.Document.ALL), loop.on_document))
+    app.add_handler(MessageHandler(_gated(filters.Sticker.ALL), loop.on_sticker))
+    app.add_handler(MessageHandler(_gated(filters.VIDEO), loop.on_video))
     app.job_queue.run_repeating(loop.check_flush, interval=0.5, first=0.5)
     app.job_queue.run_repeating(loop.check_heartbeat, interval=15, first=10)
     app.job_queue.run_repeating(loop.check_qidu_signal, interval=cfg.qidu_signal_poll_interval, first=5)

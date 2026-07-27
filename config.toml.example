@@ -27,6 +27,41 @@ receipt_text_chars = 120
 # rides the reply kick instead of an empty string, e.g. Msg #7 replied: "[media]".
 kick_media_placeholder = "[media]"
 
+# ── Cortex shell (tg) ─────────────────────────────────
+# Active iff shell_id below is a member of marrow's [cortex].shells (single
+# source — no enable flag here). Absent from that list = plain relay resident
+# (no scheduler, no silence cycle, no cortex env).
+[cortex]
+# Shell id handed to marrow as MARROW_CORTEX; must appear in marrow's
+# [cortex].shells list for the resident to get the cortex tools.
+shell_id = "tg"
+# Ledger shared with marrow: <dir>/<shell>.json (session_id / next_wake_at /
+# last_note_ts / occupancy / pending_note / rotate_pending / tokens_today_base +
+# tokens_date = today's finished-session tokens, dated in [core].timezone).
+# Keep the socket path SHORT — macOS caps an
+# AF_UNIX path at 104 bytes. marrow's [cortex].shell_socket must match.
+shell_state_dir = "~/.config/marrow/state/shells"
+shell_socket = "~/.config/marrow/state/shells/tg.sock"
+# Minutes of user silence before one rendered note turn is fed to the resident.
+shell_idle_min = 20
+# argv printing the wakeup note on stdout. Empty = every round is skipped.
+# Pass `--shell <shell_id>` so cortex drops THIS shell's own channel from the
+# note's Replay section — without it the shell replays its own conversation
+# back at itself every round.
+# Pass `--no-ct` too: the marrow hook delivers ct-targeted notes via its outbox,
+# so a render that also peeks them doubles them in the same payload.
+# e.g. ["~/CC-Lab/cortex/.venv/bin/python", "-m", "cortex.note_render", "--no-ct", "--shell", "tg"]
+note_render_cmd = []
+note_render_timeout_s = 20
+# Machine tag opening a fed turn — must be a marrow [cortex].machine_markers
+# member, else the fed note reads as a real user message.
+shell_note_tag = "⏳ [NEW ROUND]"
+# Context occupancy at which the resident is asked to wrap up and is then
+# respawned fresh. 0 disables the fuse.
+fuse_tokens = 180000
+fuse_tag = "⚙️ [FUSE]"
+# fuse_prompt_text = "..."
+
 # ── WeChat ────────────────────────────────────────────
 [user]
 # Your wxid — run `python -m synapse_wx.ilink` to find it after QR login

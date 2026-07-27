@@ -11,9 +11,10 @@ import queue
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,7 +32,8 @@ from synapse_core.debounce import InboundBuffer
 from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, POLL_EOF, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT
 from synapse_core.providers.codex import CodexProvider, is_codex_model
 from synapse_core.providers.errors import ProviderDeadError
-from synapse_core.state import BridgeState
+from synapse_core.state import BridgeState, remember_resolved_model
+from synapse_core.text_clean import strip_tool_xml
 
 from .media.inbound import (
     build_read_instruction,
@@ -45,6 +47,7 @@ from synapse_core import cortex_kick
 from .markdown import gfm_to_tg_html
 from .media.outbound import send_media
 from . import outbox
+from .shell import _tzinfo
 from .split import split_for_tg, split_for_tg_typed
 from .typing_action import TypingAction
 
@@ -90,7 +93,7 @@ class _NullTyping:
 
 # HTML-comment silence protocol lives in synapse_core.text_filters;
 # re-exported here so existing imports keep working.
-from synapse_core.text_filters import _HTML_COMMENT_RE, strip_html_comments  # noqa: E402
+from synapse_core.text_filters import strip_html_comments  # noqa: E402
 
 
 def _chat_meta(msg) -> str:
@@ -184,6 +187,7 @@ class TgLoop:
         self._pending_chat_id: int | None = None
         self._bot: Bot | None = None
         self._state_path = cfg.data_dir / "bridge_state.json"
+        self._tz = _tzinfo(cfg.timezone)
         self._state = self._load_state()
         if self._state.chat_id is not None:
             self._pending_chat_id = self._state.chat_id
@@ -200,13 +204,42 @@ class TgLoop:
         # Resident idle listener: drains unsolicited (background-task) turns
         # between sends so they never rot in the stdout queue and mispair.
         self._listener_stop = asyncio.Event()
+        # Cortex shell host (T9), attached by __main__ when shell_active().
+        # None = plain relay resident, every shell branch below is skipped.
+        self._shell = None
+
+    def attach_shell(self, shell) -> None:
+        self._shell = shell
+
+    def attach_bot(self, bot) -> None:
+        """Seed the outbound bot at startup. Without it every bridge-initiated
+        round (shell note, unsolicited turn) is stuck until the user speaks
+        first, because self._bot is otherwise only learned from an inbound
+        message."""
+        if self._bot is None:
+            self._bot = bot
+
+    def _outbound_target(self) -> tuple["Bot | None", int | None]:
+        """Where a bridge-initiated round ships: the live chat once one is
+        known, else the configured [tg].chat_id — a freshly restarted bridge
+        has no inbound message yet."""
+        chat_id = self._pending_chat_id
+        if chat_id is None:
+            chat_id = self._cfg.chat_id
+        return self._bot, chat_id
 
     def _load_state(self) -> BridgeState:
-        state = BridgeState(model=self._cfg.default_model)
+        state = BridgeState()
         saved = bridge_state_store.load(self._state_path)
         for k, v in saved.items():
             if hasattr(state, k):
                 setattr(state, k, v)
+        # A saved /model switch is the new default and wins. default_model only
+        # seeds a bridge that never switched; empty → None, not "", so it
+        # matches the "no model known yet" sentinel used everywhere else
+        # (provider skips --model, display_name shows "?").
+        if not state.model:
+            state.model = self._cfg.default_model or None
         return state
 
     def _persist_state(self) -> None:
@@ -268,10 +301,10 @@ class TgLoop:
     _DIARY_SCRIPT = "\n".join([
         "import sys,json",
         "from datetime import datetime,timedelta",
-        "from zoneinfo import ZoneInfo",
+        "from marrow.config import get_tz",
         "from marrow.timecue import parse_time_cue",
         "from marrow.daemon import recall",
-        "_m=ZoneInfo('Australia/Melbourne')",
+        "_m=get_tz()",
         "cue=parse_time_cue(sys.stdin.read().strip(),datetime.now(_m))",
         "if not cue:print('null');sys.exit(0)",
         "s=datetime.fromisoformat(cue.since_utc).astimezone(_m).strftime('%Y-%m-%d')",
@@ -306,7 +339,10 @@ class TgLoop:
             close_provider=self._close_provider,
             forget_session=self._forget_session,
             persist_state=self._persist_state,
-            clear_default_model=self._cfg.default_model,
+            # Empty on purpose: default_model only SEEDS a never-switched
+            # bridge (_load_state). /clear must follow the saved state.model
+            # so a /model switch survives it.
+            clear_default_model="",
             commands_doc_path=Path(__file__).resolve().parents[1] / "COMMANDS.md",
             fetch_diary=self._make_fetch_diary(),
             record_effort=self._record_effort,
@@ -316,9 +352,24 @@ class TgLoop:
         )
         return Registry(ctx)
 
+    def _shell_fold(self, resume_sid: str | None) -> None:
+        """Window-end choke point for the cortex shell's today ledger. Every
+        provider spawn — fuse respawn, rotate, /clear, /resume, /cwd,
+        cross-channel takeover, crash respawn — goes through _make_provider, so
+        folding here catches them all; resuming the ledger's own session is a
+        no-op, and the fold itself is idempotent. No-op for a plain relay
+        resident; never raises into the turn path."""
+        if self._shell is None:
+            return
+        try:
+            self._shell.fold_session(resume_sid)
+        except Exception as e:  # noqa: BLE001 — ledger bookkeeping is best-effort
+            logger.warning("shell fold_session failed: %s", e)
+
     def _make_provider(self) -> ClaudeCodeProvider | CodexProvider:
         cfg = self._cfg
         state = self._state
+        self._shell_fold(state.session_id)
         if is_codex_model(state.model):
             return CodexProvider(
                 model=state.model,
@@ -343,6 +394,10 @@ class TgLoop:
             idle_hard_s=cfg.idle_hard_s,
             tool_idle_hard_s=cfg.tool_idle_hard_s,
             turn_output_cap=cfg.turn_output_cap,
+            # Cortex shell id — marrow reads MARROW_CORTEX to decide whether
+            # this resident gets the cortex tools/hooks (T8). Gate: T7 single
+            # source (marrow's [cortex].shells), no local enable flag.
+            extra_env={"MARROW_CORTEX": cfg.shell_id} if cfg.shell_active() else None,
         )
 
     def ensure_provider(self) -> None:
@@ -402,7 +457,9 @@ class TgLoop:
                 for block in msg.get("content", []):
                     bt = block.get("type")
                     if bt == "text":
-                        chunks.append(block["text"])
+                        cleaned = strip_tool_xml(block["text"])
+                        if cleaned:
+                            chunks.append(cleaned)
                     elif bt == "thinking":
                         if block.get("thinking"):
                             thinking.append(block["thinking"])
@@ -414,6 +471,15 @@ class TgLoop:
     def _handle_init_event(self, ev: dict) -> None:
         """Shared system(init) handling: adopt session_id, stamp created_at,
         record the session. Used by every turn (solicited + unsolicited)."""
+        # cc reports the model it actually resolved (state.model may be a
+        # floating alias like "opus"). Display-only — mirrored onto the
+        # provider because the idle listener parses init events outside recv().
+        model = ev.get("model")
+        if isinstance(model, str) and model and self._provider is not None:
+            self._provider.model_actual = model
+            token = self._provider.model or self._state.model
+            if remember_resolved_model(self._state, token, model):
+                self._persist_state()
         sid = ev.get("session_id")
         if not (sid and isinstance(sid, str)):
             return
@@ -436,7 +502,8 @@ class TgLoop:
                 logger.warning("record_session failed for %s", sid)
 
     async def _collect_turn(
-        self, typing: TypingAction, first_line: str | None = None
+        self, typing: TypingAction, first_line: str | None = None,
+        bot: Bot | None = None, chat_id: int | None = None,
     ) -> tuple[str, str, bool] | None:
         """Drain ONE turn from the provider. Returns (text, thinking,
         unsolicited) or None when the recv thread ended before any turn
@@ -444,6 +511,8 @@ class TgLoop:
 
         `first_line` is a raw line the idle listener already pulled off the
         queue that opened this turn; recv processes it before the queue.
+        `bot`/`chat_id` (when known) let a lie_down(rotate=False) tool_use
+        send its 💤 notice immediately.
         """
         assert self._provider is not None
         q: queue.Queue = queue.Queue()
@@ -486,12 +555,17 @@ class TgLoop:
                 for block in msg.get("content", []):
                     bt = block.get("type")
                     if bt == "text":
-                        chunk = block.get("text", "")
+                        chunk = strip_tool_xml(block.get("text", ""))
                         if chunk:
                             text_chunks.append(chunk)
                     elif bt == "tool_use":
                         if not typing.running:
                             typing.start()
+                        name = block.get("name") or ""
+                        if name.endswith("lie_down"):
+                            tool_input = block.get("input") or {}
+                            if not tool_input.get("rotate"):
+                                await self._notify_lie_down(bot, chat_id, tool_input)
                     elif bt == "thinking":
                         # Fallback: stream_event thinking_delta is preferred
                         # (fable needs it), but opus 4.x often only fills
@@ -545,7 +619,7 @@ class TgLoop:
         assert self._provider is not None
         unsolicited_count = 0
         while True:
-            turn = await self._collect_turn(typing)
+            turn = await self._collect_turn(typing, bot=bot, chat_id=chat_id)
             if turn is None:
                 return "", ""
             text, thinking, unsolicited = turn
@@ -564,8 +638,7 @@ class TgLoop:
         provider = self._provider
         if provider is None or not getattr(provider, "alive", False):
             return  # nothing to drain; lazy respawn happens on the next send
-        bot = self._bot
-        chat_id = self._pending_chat_id
+        bot, chat_id = self._outbound_target()
 
         async with self._lock:
             # Re-read after acquiring: a swap may have replaced it while waiting.
@@ -579,8 +652,12 @@ class TgLoop:
                 logger.info("idle listener: provider EOF — marked dead, awaiting respawn")
                 provider.alive = False
                 return
-            # A line means a full turn is arriving unsolicited. Target the last
-            # real chat; if none, drop with a warning (never crash).
+            # Classify BEFORE reacting: only a line whose event opens a genuine
+            # unsolicited turn may start typing and enter the blocking drain.
+            if self._consume_non_turn_line(line):
+                return
+            # A real unsolicited turn is arriving. Target the last real chat;
+            # if none, drop with a warning (never crash).
             if bot is None or chat_id is None:
                 logger.warning("idle listener: unsolicited turn with no chat target — dropped")
                 # Still drain the turn so it doesn't rot in the queue.
@@ -593,20 +670,59 @@ class TgLoop:
             finally:
                 typing.stop()
 
+    def _consume_non_turn_line(self, line: str) -> bool:
+        """Classify a first polled line; True when it opens NO turn and was
+        consumed here (no typing, no blocking recv).
+
+        Every cc spawn (fresh or --resume, e.g. shell_respawn / /model) emits a
+        system{init} handshake as its first stdout line. It carries no result
+        event, so feeding it to _collect_turn blocks recv until idle_hard_s and
+        then SIGKILLs the fresh process — while typing runs the whole time.
+        Handle the handshake's state here instead; only a task_notification-first
+        line is a real unsolicited turn."""
+        stripped = line.strip()
+        if not stripped:
+            return True
+        try:
+            ev = json.loads(stripped)
+        except ValueError:
+            logger.warning("idle listener: skip non-json line: %s", line[:120])
+            return True
+        if not isinstance(ev, dict):
+            logger.warning("idle listener: skip non-object line: %s", line[:120])
+            return True
+        if _is_unsolicited_first_event(ev):
+            return False
+        if ev.get("type") == "system" and ev.get("subtype") == "init":
+            self._handle_init_event(ev)
+            logger.info(
+                "idle listener: consumed spawn handshake (sid=%s)",
+                ev.get("session_id"),
+            )
+        else:
+            logger.warning(
+                "idle listener: dropped non-turn first event (type=%s subtype=%s)",
+                ev.get("type"), ev.get("subtype"),
+            )
+        return True
+
     async def _drain_unsolicited(
         self, bot: Bot, chat_id: int, typing: TypingAction, first_line: str
     ) -> None:
         """Collect and deliver the unsolicited turn opened by first_line, plus
-        any consecutive back-to-back turns already queued behind it."""
+        any consecutive back-to-back turns already queued behind it. Each queued
+        line is classified too: a non-turn line (spawn handshake) is consumed
+        without entering the blocking drain."""
         count = 0
         line: str | None = first_line
         while line is not None:
-            turn = await self._collect_turn(typing, first_line=line)
-            if turn is not None:
-                text, thinking, _unsolicited = turn
-                count += 1
-                self._maybe_storm_alert(count)
-                await self._deliver_reply(bot, chat_id, text, thinking)
+            if not self._consume_non_turn_line(line):
+                turn = await self._collect_turn(typing, first_line=line, bot=bot, chat_id=chat_id)
+                if turn is not None:
+                    text, thinking, _unsolicited = turn
+                    count += 1
+                    self._maybe_storm_alert(count)
+                    await self._deliver_reply(bot, chat_id, text, thinking)
             # Peek for the next queued turn without blocking on idle liveness.
             provider = self._provider
             if provider is None or not getattr(provider, "alive", False):
@@ -645,6 +761,31 @@ class TgLoop:
         for k, v in usage.items():
             if isinstance(v, int):
                 self._state.usage_total[k] = self._state.usage_total.get(k, 0) + v
+
+    def _local_hhmm_plus(self, minutes: float = 0.0) -> str:
+        """Now + `minutes`, rendered HH:mm in [core].timezone."""
+        now = datetime.now(self._tz)
+        return (now + timedelta(minutes=minutes)).strftime("%H:%M")
+
+    async def _notify_lie_down(
+        self, bot: Bot | None, chat_id: int | None, tool_input: dict
+    ) -> None:
+        """lie_down(rotate=False) tool_use: send the 💤 notice right away.
+        No-op without a known chat target; never raises into the turn."""
+        if bot is None or chat_id is None:
+            return
+        try:
+            mins = int(float(tool_input.get("next_wake_min")))
+        except (TypeError, ValueError):
+            logger.warning("lie_down notice: bad next_wake_min %r",
+                           tool_input.get("next_wake_min"))
+            return
+        text = messages.t("shell.lie_down", self._state.voice_style,
+                          min=mins, time=self._local_hhmm_plus(mins))
+        try:
+            await bot.send_message(chat_id=chat_id, text=text)
+        except Exception as e:
+            logger.warning("lie_down notice send failed: %s", e)
 
     def _maybe_storm_alert(self, count: int) -> None:
         """More than unsolicited_storm_cap unsolicited turns in one lock-hold
@@ -753,6 +894,7 @@ class TgLoop:
                 pass
         return {
             "model": self._state.model,
+            "model_actual": getattr(self._provider, "model_actual", None),
             "session_id": self._state.session_id,
             "effort": self._state.effort_level,
             "thinking": self._state.thinking_on,
@@ -862,19 +1004,23 @@ class TgLoop:
 
     def _track(self, bot: Bot, chat_id: int,
                text: str = "", msg_date: datetime | None = None,
-               media_type: str = "") -> None:
+               media_type: str = "", count_activity: bool = True) -> None:
         self._bot = bot
         self._pending_chat_id = chat_id
         if self._state.chat_id != chat_id:
             self._state.chat_id = chat_id
             self._persist_state()
-        # P6: inbound from her (chat_id matches the authorized recipient) drives
-        # watch-reply + morning flag-pull kicks. Any other chat is ignored here.
-        # `text` = her reply body, threaded into the reply kick so the wakeup
-        # note shows WHAT she said (empty for media-only turns). `msg_date` =
-        # Telegram's native message timestamp, bounding the receipt stamp to
-        # notes sent at/before this message (F1). `media_type` tags a
-        # media-only turn (e.g. "photo") so the receipt shows what she sent.
+        # Any inbound message restarts the cortex shell's silence cycle,
+        # except a recognized slash command (on_message passes
+        # count_activity=False so /info etc. don't reset the idle timer).
+        if count_activity and self._shell is not None:
+            self._shell.on_user_message()
+        # P6: inbound from the authorized recipient drives watch-reply kicks.
+        # Any other chat is ignored here. `text` = the reply body, threaded into
+        # the reply kick so the wakeup note shows WHAT was said (empty for
+        # media-only turns). `msg_date` = Telegram's native message timestamp,
+        # bounding the receipt stamp to notes sent at/before this message (F1).
+        # `media_type` tags a media-only turn (e.g. "photo").
         if self._is_from_her(chat_id):
             self._inbound_from_her(text, msg_date=msg_date, media_type=media_type)
 
@@ -889,10 +1035,9 @@ class TgLoop:
 
     def _inbound_from_her(self, text: str = "", msg_date: datetime | None = None,
                           media_type: str = "") -> None:
-        """Her message landed on tg -> claim any armed watches on tg (one kick),
-        and morning flag-pull (night flag + past morning_start -> kick). Never
-        raises; no-ops without kick_cmd. Reply path claims instantly (no other
-        DB query). `text` = her reply body, attached to the reply kick; a
+        """Her message landed on tg -> claim any armed watches on tg (one kick).
+        Never raises; no-ops without kick_cmd. Reply path claims instantly (no
+        other DB query). `text` = her reply body, attached to the reply kick; a
         media-only reply (no extractable text) substitutes "[<media_type>]" (or
         the config placeholder when the type is unknown) so the reason line
         never renders an empty quote. `msg_date` bounds the receipt stamp to
@@ -920,10 +1065,6 @@ class TgLoop:
                 note_id = ids[0] if len(ids) == 1 else ",".join(str(i) for i in ids)
                 cortex_kick.kick(kc, "reply", note_id=note_id, text=kick_text,
                                  text_chars=self._cfg.outbox_kick_text_chars)
-            if cortex_kick.night_mode(self._cfg.cortex_wake_state_file) and \
-                    cortex_kick.past_morning_start(
-                        self._cfg.night_morning_start, self._cfg.timezone):
-                cortex_kick.kick(kc, "morning")
         except Exception as e:
             logger.warning("inbound-from-her kick failed: %s", e)
 
@@ -978,7 +1119,8 @@ class TgLoop:
         if not text:
             return
         self._track(context.bot, update.message.chat_id, text=text,
-                     msg_date=update.message.date)
+                     msg_date=update.message.date,
+                     count_activity=not self._registry.is_command(text))
 
         action, ack = self._registry.dispatch(text)
         inject = self._registry.pending_rewrite
@@ -1211,6 +1353,79 @@ class TgLoop:
         # InboundBuffer (never drained) and become the next turn — no merge,
         # no reply-drop.
         await self._deliver_reply(bot, chat_id, response, thinking)
+        await self._shell_after_turn()
+
+    async def _shell_after_turn(self) -> None:
+        """Hand a completed turn to the cortex shell host (token ledger + fuse).
+        No-op for a plain relay resident; never raises into the turn path."""
+        if self._shell is None:
+            return
+        try:
+            await self._shell.after_turn()
+        except Exception as e:  # noqa: BLE001 — shell bookkeeping is best-effort
+            logger.warning("shell after_turn failed: %s", e)
+
+    async def feed_turn(self, body: str) -> bool:
+        """Feed one machine turn (note / fuse prompt) into the resident session
+        and ship its reply to tg like any other turn — free-round replies are
+        never held. Returns False when there is no chat target or the provider
+        could not take the turn."""
+        bot, chat_id = self._outbound_target()
+        if bot is None or chat_id is None:
+            logger.warning("feed_turn: no chat target — round skipped")
+            return False
+        typing = TypingAction(bot, chat_id)
+        async with self._lock:
+            try:
+                self.ensure_provider()
+                if self._provider is None:
+                    logger.warning("feed_turn: no provider — round skipped")
+                    return False
+                typing.start()
+                await asyncio.to_thread(self._provider.send, body)
+                response, thinking = await self._stream_response(bot, chat_id, typing)
+            except Exception as e:
+                logger.warning("feed_turn failed: %s", e)
+                return False
+            finally:
+                typing.stop()
+        await self._deliver_reply(bot, chat_id, response, thinking)
+        return True
+
+    def shell_respawn(self) -> None:
+        """Drop the resident session and spawn a fresh one (fuse). Queued user
+        messages stay on the InboundBuffer and land in the new session."""
+        self._state.session_id = None
+        self._session_created_at = None
+        self._persist_state()
+        self._swap_provider(None, None)
+        logger.info("shell respawn: fresh session")
+
+    async def shell_rotate(self, wake: float | None = None) -> None:
+        """lie_down(rotate=True) from the shell: let any in-flight turn finish,
+        then drop the session for a fresh one. The lock is what the fuse path
+        gets for free by respawning after its turn — a rotate kick can land
+        mid-turn. This is the truthful rotation signal (a rotate tool_use
+        alone can be denied by a marrow hook) — send the 🌙 notice here, and
+        carry the booked wake (`wake`, epoch seconds) when there is one."""
+        async with self._lock:
+            self.shell_respawn()
+        bot, chat_id = self._outbound_target()
+        if bot is None or chat_id is None:
+            return
+        mins = 0
+        if wake is not None:
+            mins = round((wake - datetime.now(self._tz).timestamp()) / 60)
+        if mins <= 0:
+            text = messages.t("shell.rotated", self._state.voice_style)
+        else:
+            text = messages.t(
+                "shell.rotated_wake", self._state.voice_style, min=mins,
+                time=datetime.fromtimestamp(wake, self._tz).strftime("%H:%M"))
+        try:
+            await bot.send_message(chat_id=chat_id, text=text)
+        except Exception as e:
+            logger.warning("rotate notice send failed: %s", e)
 
 
     async def _deliver_reply(

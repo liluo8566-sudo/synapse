@@ -51,10 +51,22 @@ _EFFORT_LEVELS: frozenset[str] = frozenset(
     {"low", "medium", "high", "xhigh", "max", "ultracode", "auto"}
 )
 
+# Slash command names _dispatch_slash recognizes (mirrors the `if name ==`
+# chain below). Any other leading-"/" text still gets "handled" there (via
+# an unknown.cmd ack) but is_command() below reports it as NOT a known
+# command, so callers (e.g. the tg idle timer) can tell "/info" apart from
+# "/typo". Keep this set in sync with _dispatch_slash's branches.
+_KNOWN_SLASH_COMMANDS: frozenset[str] = frozenset({
+    "info", "status", "usage", "model", "clear", "new", "stop", "help",
+    "resume", "rewind", "regen", "thinking", "quote", "effort", "compact",
+    "voice", "cwd", "diary",
+})
+
 # /cwd presets. Index = digit shown to user; preset 1 is the boot fallback
-# when persisted state.cc_cwd no longer exists on disk. Loaded from
-# SYNAPSE_CWD_PRESETS env var (colon-separated paths); falls back to empty
-# tuple when unset so the caller sees "no presets" rather than hardcoded paths.
+# when persisted state.cc_cwd no longer exists on disk. Both bridges override
+# this at boot from their config's [cwd_presets]; the SYNAPSE_CWD_PRESETS env
+# var (colon-separated paths) is the fallback when that table is absent, and an
+# empty tuple means "no presets" rather than hardcoded paths.
 _CWD_PRESETS: tuple[str, ...] = tuple(
     p for p in os.environ.get("SYNAPSE_CWD_PRESETS", "").split(":") if p.strip()
 )
@@ -149,7 +161,10 @@ class CommandContext:
     resolve_resume_model: Callable[[str], str | None] = field(
         default_factory=lambda: lambda _sid: None
     )
-    clear_default_model: str = "claude-opus-4-6[1m]"
+    # Empty = no fixed default; /clear (and the implicit-clear paths below)
+    # fall back to `state.model`, i.e. follow whatever the session was
+    # already on instead of resetting to a pinned model.
+    clear_default_model: str = ""
     # B6: recent-session picker for empty /resume.
     list_recent_sessions: Callable[[], list[dict]] = field(
         default_factory=lambda: lambda: []
@@ -248,6 +263,21 @@ class Registry:
     def _t(self, key: str, **vars: object) -> str:
         """Render an ack in the current voice style."""
         return messages.t(key, self._ctx.state.voice_style, **vars)
+
+    def is_command(self, raw: str) -> bool:
+        """Read-only: would `raw` dispatch to a KNOWN slash command name?
+
+        Does not execute anything or mutate state. Used by bridges to gate
+        side effects (e.g. tg's idle-timer reset) on recognized commands
+        only, not on any leading-"/" text.
+        """
+        if raw is None:
+            return False
+        text = raw.strip()
+        if not text.startswith("/"):
+            return False
+        head, _, _ = text[1:].partition(" ")
+        return head.lower() in _KNOWN_SLASH_COMMANDS
 
     def dispatch(self, raw: str) -> DispatchResult:
         self._pending_rewrite = None
@@ -382,7 +412,9 @@ class Registry:
         state = self._ctx.state
         snap = self._safe_status()
 
-        model_disp = display_name(state.model)
+        # Prefer the model cc actually resolved — state.model may hold a
+        # floating alias ("opus") or be unset on a fresh boot.
+        model_disp = display_name(snap.get("model_actual") or state.model)
         effort = state.effort_level or "high"
         cwd = snap.get("cwd") or "?"
         health = _health_word(snap)
@@ -437,14 +469,13 @@ class Registry:
         self._ctx.swap_provider(canonical, resume_sid)
         state.model = canonical
         self._ctx.persist_state()
-        return self._t("model.ok", name=name)
+        return self._t("model.ok", name=self._resolved_name(canonical))
 
     def _handle_clear(self) -> str:
         state = self._ctx.state
-        # B1: every /clear lands on opus-4.6[1m] (or whatever ctx says) so the
-        # user does not silently stay on the last session's model. Both
-        # effort_level and thinking_on persist across /clear — user prefs
-        # stick, only model resets (0614).
+        # Model carries over from the last session unless ctx pins one
+        # (clear_default_model is "" on tg). effort_level and thinking_on
+        # persist too — /clear resets the session, not the user's prefs.
         default_model = self._ctx.clear_default_model or state.model
         # Close cc so the SessionEnd hook archives events into the DB. Events
         # also land per-turn via cc's Stop hook.
@@ -463,7 +494,19 @@ class Registry:
         self._ctx.swap_provider(default_model, None)
         self._ctx.persist_state()
         effort = (state.effort_level or "high").capitalize()
-        return self._t("clear.ok", name=display_name(default_model), effort=effort)
+        return self._t(
+            "clear.ok", name=self._resolved_name(default_model), effort=effort
+        )
+
+    def _resolved_name(self, token: str | None) -> str:
+        """Display name for a model token, via the resolved-model cache.
+
+        Hit (state.model_resolved, learned from an earlier system/init): the
+        concrete id cc reports for this token. Miss: the token itself, which
+        may be a floating alias like "opus". Display-only, never a state write.
+        """
+        cached = (self._ctx.state.model_resolved or {}).get(token or "")
+        return display_name(cached or token)
 
     def _handle_resume(self, rest: str) -> str:
         """B1: /resume <sid> reads model from marrow.sessions (fallback jsonl
@@ -514,7 +557,9 @@ class Registry:
             model = state.model
         else:
             branch = "clear_default"
-            model = self._ctx.clear_default_model
+            # Empty clear_default_model → None, not "", so it matches the
+            # "no model known" sentinel used everywhere else.
+            model = self._ctx.clear_default_model or None
         logger.info(
             "/resume sid=%s model=%s branch=%s", sid[:8], model, branch
         )

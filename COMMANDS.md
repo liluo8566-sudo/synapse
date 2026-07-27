@@ -4,9 +4,9 @@
 
 ## Slash
 
-- /clear (alias /new) — fresh session, model reset to default
+- /clear (alias /new) — fresh session, keeps current model
 - /stop — interrupt, keep sid
-- /model <id|alias> — swap model, keep sid
+- /model <id|alias> — swap model, keep sid; becomes the new default (survives restart)
 - /info (alias /status, /usage) — model | effort | health / sid | uptime | ctx
 - /help — render this file
 - /thinking on|off — emit thinking block per turn
@@ -35,6 +35,14 @@
 - sonnet → Sonnet 4.6
 - haiku → Haiku 4.5
 - codex → Codex CLI
+
+## Cortex circuit breaker (not a bridge command)
+
+- Stops cortex autonomous activity (fed rounds / auto wake). Bridge and normal chat unaffected.
+- Persistent across restarts. State: `~/.config/marrow/breaker.json` (MAP.md §9.1).
+- On: `/ct-pause` in cc cli (`cortex.ctl pause [--shell cli|tg]`).
+- Off: `/ct-wake` (clear + wake) or `cortex.ctl resume` (clear only). Show: `cortex.ctl status`.
+- Auto-trips after `[cortex.breaker].fuse_threshold` fuses within `window_hours` (marrow config.toml).
 
 ## Hold words
 
