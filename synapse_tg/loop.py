@@ -567,26 +567,23 @@ class TgLoop:
                             if not tool_input.get("rotate"):
                                 await self._notify_lie_down(bot, chat_id, tool_input)
                     elif bt == "thinking":
-                        # Fallback: stream_event thinking_delta is preferred
-                        # (fable needs it), but opus 4.x often only fills
-                        # this final block. Read it only when no deltas
-                        # arrived yet to avoid duplicate bubbles.
-                        if not thinking_chunks:
-                            txt = block.get("thinking")
-                            if isinstance(txt, str) and txt:
-                                thinking_chunks.append(txt)
+                        # cc fills BOTH the stream_event thinking_delta path
+                        # and this final-frame thinking block with the same
+                        # plaintext under --include-partial-messages. Reading
+                        # both would duplicate the 🧠 bubble; stream_event is
+                        # the source of truth — skip here.
+                        pass
                 usage = msg.get("usage")
                 if isinstance(usage, dict):
                     self._merge_usage(usage)
                     snap = {k: v for k, v in usage.items() if isinstance(v, int)}
                     if snap:
                         self._state.last_assistant_usage = snap
-
             elif t_type == "stream_event":
                 # cc --include-partial-messages forwards SSE deltas as
                 # `stream_event` frames. Under OAuth the final assistant
                 # `thinking` block is empty (signature-only); the plaintext
-                # only lives in the in-flight `thinking_delta` chunks here.
+                # only lives in these in-flight `thinking_delta` chunks.
                 e = ev.get("event") or {}
                 if e.get("type") == "content_block_delta":
                     d = e.get("delta") or {}
@@ -594,8 +591,6 @@ class TgLoop:
                         txt = d.get("thinking")
                         if isinstance(txt, str) and txt:
                             thinking_chunks.append(txt)
-
-
             elif t_type == "result":
                 usage = ev.get("usage")
                 if isinstance(usage, dict):
@@ -605,7 +600,7 @@ class TgLoop:
             # Thread ended with no events at all (clean EOF between turns).
             return None
         self._death_count = 0
-        return "\n\n".join(text_chunks), "".join(thinking_chunks).strip(), unsolicited
+        return "\n\n".join(text_chunks), "".join(thinking_chunks), unsolicited
 
     async def _stream_response(
         self, bot: Bot, chat_id: int, typing: TypingAction
@@ -1006,9 +1001,11 @@ class TgLoop:
         if self._state.chat_id != chat_id:
             self._state.chat_id = chat_id
             self._persist_state()
-        # Any inbound message restarts the cortex shell's silence cycle,
-        # except a recognized slash command (on_message passes
-        # count_activity=False so /info etc. don't reset the idle timer).
+        # An inbound message restarts the cortex shell's silence cycle and
+        # cancels a booked wake only when it actually reaches the LLM. Text
+        # turns count a "forward" verdict or an injected rewrite; anything the
+        # registry consumes without injecting leaves a scheduled wake standing.
+        # Media turns always count.
         if count_activity and self._shell is not None:
             self._shell.on_user_message()
         # P6: inbound from the authorized recipient drives watch-reply kicks.
@@ -1114,12 +1111,16 @@ class TgLoop:
         text = update.message.text.strip()
         if not text:
             return
-        self._track(context.bot, update.message.chat_id, text=text,
-                     msg_date=update.message.date,
-                     count_activity=not self._registry.is_command(text))
-
+        # Dispatch before _track: its verdict plus any pending rewrite tells a
+        # message that feeds the LLM apart from one the registry only consumes.
+        # Nothing inside dispatch reads the bot/chat_id _track binds. Both are
+        # synchronous, so no other task can observe the gap.
         action, ack = self._registry.dispatch(text)
         inject = self._registry.pending_rewrite
+        self._track(context.bot, update.message.chat_id, text=text,
+                     msg_date=update.message.date,
+                     count_activity=(action == "forward" or bool(inject)))
+
         if action == "handled":
             if self._queued_extra_bubbles:
                 bubbles = self._queued_extra_bubbles[:]
@@ -1444,7 +1445,7 @@ class TgLoop:
             try:
                 await bot.send_message(chat_id=chat_id, text=think_html, parse_mode="HTML")
             except Exception as e:
-                logger.warning("thinking bubble send failed: %s", e)
+                logger.warning("thinking send failed: %s", e)
 
         if not response:
             return
