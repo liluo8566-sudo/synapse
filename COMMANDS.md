@@ -36,12 +36,13 @@
 - haiku → Haiku 4.5
 - codex → Codex CLI
 
-## Cortex circuit breaker (not a bridge command)
+## Cortex duty + circuit breaker (not bridge commands)
 
+- cc cli slash surface only — the bridge does not mount them; `/ct-duty` sent here answers unknown.cmd.
 - Stops cortex autonomous activity (fed rounds / auto wake). Bridge and normal chat unaffected.
-- Persistent across restarts. State: `~/.config/marrow/breaker.json` (MAP.md §9.1).
-- On: `/ct-pause` in cc cli (`cortex.ctl pause [--shell cli|tg]`, scopes merge).
-- Off: `/ct-wake [tg|cli|all]` (clear + kick that shell now) or `cortex.ctl resume [--shell]` (clear only). Show: `cortex.ctl status`.
+- Persistent across restarts. State: `~/.config/marrow/breaker.json` ∪ `duty.json` (MAP.md §9.1).
+- Duty: `/ct-duty cli|tg|off|all` (`cortex.ctl duty <mode>`) — that shell runs, the other is held; clears the breaker first.
+- Breaker plumbing: `cortex.ctl pause|resume [--shell cli|tg]` (pause scopes merge), `cortex.ctl wake [--shell]` = clear + kick. Show: `cortex.ctl status`.
 - Auto-trips after `[cortex.breaker].fuse_threshold` fuses within `window_hours` (marrow config.toml).
 
 ## Hold words

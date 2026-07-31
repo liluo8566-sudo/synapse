@@ -27,6 +27,12 @@ A directed kick (marrow writes PENDING_NOTE_KEY into the ledger, then kicks)
 overrides the deadline: the pending text is claimed atomically and fed as that
 round's turn instead of the rendered note. A lie_down(rotate=True) writes
 ROTATE_KEY the same way and respawns the resident instead of feeding anything.
+
+A duty rotation also stages SOURCE_KEY — the one-shot line saying why this
+shell came up — which the note renderer claims on the round it delivers.
+Anything that ends the staged round without feeding it (a respawn with no wake
+of its own, an inbound message cancelling the booked wake) discards the line
+rather than let it surface on a later, unrelated wake.
 """
 
 from __future__ import annotations
@@ -54,6 +60,9 @@ logger = logging.getLogger(__name__)
 PENDING_NOTE_KEY = "pending_note"
 # Ledger key marrow's lie_down(rotate=True) writes: end this window now.
 ROTATE_KEY = "rotate_pending"
+# Ledger key a duty rotation stages before its kick: why this shell woke. The
+# note renderer claims it on the round that delivers the note.
+SOURCE_KEY = "wake_source"
 # Idle basis: start of the current silence window, persisted so a restart
 # continues that window instead of opening a fresh one that fires at once.
 LAST_USER_KEY = "last_user_ts"
@@ -282,8 +291,11 @@ class ShellHost:
 
     def on_user_message(self) -> None:
         """Any inbound tg message cancels a booked wake and restarts the
-        silence cycle from now."""
+        silence cycle from now. A duty rotation's staged source line dies with
+        that wake: the round it was staged for is never fed, and the line is
+        true of no other one."""
         self._set_idle_basis(self._clock(), {"next_wake_at": None})
+        self._drop_source()
         self._arm()
 
     # --- fire -----------------------------------------------------------
@@ -328,7 +340,16 @@ class ShellHost:
                 # would be due at once and feed a note into a brand-new
                 # session on the next tick.
                 self._set_idle_basis(self._clock())
-                await self._loop.shell_rotate(parse_wake_at(state.get("next_wake_at")))
+                # A duty rotation stages its source line for the round it woke
+                # this shell for. With that wake due now, the re-arm below
+                # fires it into the fresh session and the renderer claims the
+                # line there. Without one, no round of this rotation's own is
+                # coming — drop the line instead of leaving it to tell some
+                # later wake it was just handed duty.
+                booked = parse_wake_at(state.get("next_wake_at"))
+                if booked is None or now < booked:
+                    self._drop_source()
+                await self._loop.shell_rotate(booked)
                 self._arm()
                 return
             wake = parse_wake_at(state.get("next_wake_at"))
@@ -405,6 +426,16 @@ class ShellHost:
             logger.warning("shell rotate flag read failed: %s", e)
             return False
         return bool(raw)
+
+    def _drop_source(self) -> None:
+        """Discard a staged duty source line this round cannot deliver. The
+        line is one-shot and only true of the wake it was staged for; left in
+        the ledger it would be read by whichever unrelated round renders
+        next."""
+        try:
+            shell_state.take(self._cfg.shell_state_dir, self._shell, SOURCE_KEY)
+        except OSError as e:
+            logger.warning("shell wake source drop failed: %s", e)
 
     def _take_pending(self) -> str | None:
         """Claim a directed kick's text (read+clear under one lock), so a failed
