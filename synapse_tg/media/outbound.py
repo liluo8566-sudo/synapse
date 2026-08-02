@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,23 @@ logger = logging.getLogger(__name__)
 TG_SEND_LIMIT = 50 * 1024 * 1024  # 50 MB
 # Extra seconds added on top of a 429 RetryAfter before retrying the send.
 _RETRY_AFTER_MARGIN_SEC = 0.5
+# Gifs whose larger side is below this render tiny via sendAnimation; send as photo instead.
+GIF_PHOTO_MAX_SIDE = 320
+
+
+def _gif_dimensions(path: str) -> tuple[int, int] | None:
+    """Return (width, height) parsed from GIF header, or None on any failure."""
+    try:
+        with open(path, "rb") as fh:
+            header = fh.read(10)
+        if len(header) < 10:
+            return None
+        if header[:6] not in (b"GIF87a", b"GIF89a"):
+            return None
+        width, height = struct.unpack_from("<HH", header, 6)
+        return width, height
+    except Exception:
+        return None
 
 
 async def send_media(
@@ -45,12 +63,21 @@ async def send_media(
     if reply_to is not None:
         kwargs["reply_to_message_id"] = reply_to
 
+    gif_as_photo = False
+    if kind == "gif":
+        dims = _gif_dimensions(path)
+        if dims is not None and max(dims) < GIF_PHOTO_MAX_SIDE:
+            gif_as_photo = True
+
     async def _send_once() -> bool:
         with open(path, "rb") as fh:
             if kind == "image":
                 await bot.send_photo(**kwargs, photo=fh)
             elif kind == "gif":
-                await bot.send_animation(**kwargs, animation=fh)
+                if gif_as_photo:
+                    await bot.send_photo(**kwargs, photo=fh)
+                else:
+                    await bot.send_animation(**kwargs, animation=fh)
             elif kind == "video":
                 await bot.send_video(**kwargs, video=fh)
             elif kind == "file":
