@@ -430,6 +430,23 @@ class TgLoop:
         self._provider = self._make_provider()
         self._provider.spawn()
 
+    def _session_write_chat_id(self) -> int | None:
+        """Return the chat_id to use when writing sessions.json on a system(init).
+
+        Prefers the already-bound _pending_chat_id; falls back to the persisted
+        state.chat_id so a bridge restart during the respawn gap (before the
+        first inbound message rebinds _pending_chat_id) can still record the
+        new session. Logs a warning instead of silently skipping when both are
+        absent (fresh install without any prior user message)."""
+        cid = self._pending_chat_id
+        if cid is None:
+            cid = getattr(self._state, "chat_id", None)
+        if cid is None:
+            logger.warning(
+                "session init: no chat_id available — sessions.json write skipped"
+            )
+        return cid
+
     def _drain_recv(self) -> tuple[str, str]:
         """Drain provider response (kept for reference). Returns (text, thinking)."""
         assert self._provider is not None
@@ -451,8 +468,10 @@ class TgLoop:
                             self._session_created_at = get_session_created_at(
                                 self._cfg.session_created_command, sid
                             ) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                        if self._sessions is not None and self._pending_chat_id is not None:
-                            self._sessions.set(str(self._pending_chat_id), sid)
+                        if self._sessions is not None:
+                            cid = self._session_write_chat_id()
+                            if cid is not None:
+                                self._sessions.set(str(cid), sid)
                         if self._record_session is not None:
                             try:
                                 self._record_session(sid, self._state.model)
@@ -500,8 +519,10 @@ class TgLoop:
             self._session_created_at = get_session_created_at(
                 self._cfg.session_created_command, sid
             ) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if self._sessions is not None and self._pending_chat_id is not None:
-            self._sessions.set(str(self._pending_chat_id), sid)
+        if self._sessions is not None:
+            cid = self._session_write_chat_id()
+            if cid is not None:
+                self._sessions.set(str(cid), sid)
         if self._record_session is not None:
             try:
                 self._record_session(sid, self._state.model)
