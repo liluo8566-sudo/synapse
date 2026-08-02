@@ -1470,6 +1470,36 @@ class TgLoop:
         self._persist_state()
         self._swap_provider(None, None)
         logger.info("shell respawn: fresh session")
+        # Schedule a silent warmup turn so the new session's system{init} is
+        # received and its session_id is persisted before any potential restart.
+        # This closes the gap where a bridge crash between respawn and first
+        # feed_turn would leave state.session_id=null, causing the next boot to
+        # spawn a third orphaned window.  The task runs after the current
+        # coroutine yields; no-ops if there is no chat target yet.
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._warmup_session())
+        except RuntimeError:
+            pass
+
+    async def _warmup_session(self) -> None:
+        """Fire one silent turn to force the new session's system{init} through
+        the init-handling path, persisting the session_id to bridge_state.json
+        and sessions.json before any potential bridge restart.
+
+        The body instructs silence so the response is stripped before delivery.
+        If the turn cannot be fed (no chat target yet), it is skipped — the
+        first real inbound message will bring the init event with it."""
+        body = (
+            "[system:warmup] Session initialized. "
+            "Reply with only <!-- silent --> — do not send anything visible."
+        )
+        delivered = await self.feed_turn(body)
+        if delivered:
+            logger.info("session warmup: session_id=%s persisted", self._state.session_id)
+        else:
+            logger.warning("session warmup: no chat target — skipped")
 
     async def shell_rotate(self, wake: float | None = None) -> None:
         """lie_down(rotate=True) from the shell: let any in-flight turn finish,

@@ -142,6 +142,12 @@ def _host(tmp_path, clock, *, feeds=None, **kw):
         real_respawn()
 
     loop.shell_respawn = _respawn
+    # Suppress the post-respawn warmup task: it calls feed_turn which would
+    # pollute the `fed` recording and break assertions about turn count/order.
+    # Warmup correctness is covered by test_session_id_gaps.
+    async def _noop_warmup():
+        pass
+    loop._warmup_session = _noop_warmup
     host = ShellHost(cfg, loop, clock=clock)
     loop.attach_shell(host)
     host._render_note = lambda: "NOTE BODY"
