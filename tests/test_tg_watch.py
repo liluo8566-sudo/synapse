@@ -219,3 +219,45 @@ def test_outbox_poll_runs_watch_timeout(tmp_path, monkeypatch):
     asyncio.run(loop.outbox_poll(_Ctx(_Bot())))
     assert called["ch"] == "tg"
     assert fired == [{"kind": "timeout", "note_id": 3, "minutes": 10}]
+
+
+# ── slash-command receipt guard ───────────────────────────────────────────
+
+
+def _sent_plain(db, target="tg"):
+    conn = sqlite3.connect(db)
+    cur = conn.execute(
+        "INSERT INTO outbox (target, body, status) VALUES (?, 'hi', 'sent')", (target,))
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def _receipt(db, rid):
+    conn = sqlite3.connect(db)
+    r = conn.execute(
+        "SELECT replied_at, reply_text FROM outbox WHERE id=?", (rid,)).fetchone()
+    conn.close()
+    return r
+
+
+def test_handled_slash_command_does_not_stamp_receipt(tmp_path, kicks):
+    """Registry-handled slash command must not stamp a reply receipt."""
+    db = _db(tmp_path)
+    rid = _sent_plain(db)
+    loop = _loop(tmp_path, db, chat_id=999)
+    # stamp_receipt=False simulates what on_message passes when action=="handled"
+    loop._track(_Bot(), 999, text="/help", stamp_receipt=False)
+    r = _receipt(db, rid)
+    assert r[0] is None and r[1] is None
+
+
+def test_normal_text_still_stamps_receipt(tmp_path, kicks):
+    """Normal text (not a handled command) must still stamp a reply receipt."""
+    db = _db(tmp_path)
+    rid = _sent_plain(db)
+    loop = _loop(tmp_path, db, chat_id=999)
+    loop._track(_Bot(), 999, text="hello there")
+    r = _receipt(db, rid)
+    assert r[0] is not None and r[1] == "hello there"

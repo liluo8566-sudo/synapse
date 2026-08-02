@@ -56,7 +56,7 @@ def stub_kick(monkeypatch):
     """The watch-reply kick shells out; tests that assert on it re-patch."""
     monkeypatch.setattr(
         TgLoop, "_inbound_from_her",
-        lambda self, text="", msg_date=None, media_type="": None,
+        lambda self, text="", msg_date=None, media_type="", stamp_receipt=True: None,
     )
 
 
@@ -155,7 +155,7 @@ async def test_watch_reply_kick_still_fires_for_a_command(tmp_path: Path, monkey
     kicks: list[str] = []
     monkeypatch.setattr(
         TgLoop, "_inbound_from_her",
-        lambda self, text="", msg_date=None, media_type="": kicks.append(text),
+        lambda self, text="", msg_date=None, media_type="", stamp_receipt=True: kicks.append(text),
     )
     await loop.on_message(_FakeUpdate(_FakeMessage("/info")), _FakeCtx(_FakeBot()))
 

@@ -253,3 +253,35 @@ def test_outbox_scan_runs_watch_timeout(tmp_path, monkeypatch):
     loop._outbox_scan()
     assert seen["ch"] == "wx"
     assert fired == [{"kind": "timeout", "note_id": 8, "minutes": 15}]
+
+
+# ── slash-command receipt guard ───────────────────────────────────────────
+
+
+def test_wx_slash_command_does_not_stamp_receipt(tmp_path, kicks):
+    """Slash-prefixed inbound must not stamp a reply receipt on the outbox."""
+    db = _db(tmp_path)
+    rid = _sent_plain(db)
+    ilink = FakeILink(msgs=[{"from_wxid": "wxid_her", "text": "/help"}])
+    loop, _ = _loop(tmp_path, db, ilink)
+    loop.tick()
+    conn = sqlite3.connect(db)
+    row = conn.execute(
+        "SELECT replied_at, reply_text FROM outbox WHERE id=?", (rid,)).fetchone()
+    conn.close()
+    assert row[0] is None and row[1] is None
+
+
+def test_wx_normal_text_stamps_receipt(tmp_path, kicks):
+    """Normal text (not slash-prefixed) must still stamp a reply receipt."""
+    db = _db(tmp_path)
+    rid = _sent_plain(db)
+    ilink = FakeILink(msgs=[{"from_wxid": "wxid_her", "text": "hello there"}])
+    loop, _ = _loop(tmp_path, db, ilink,
+                     wallclock=lambda: datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc))
+    loop.tick()
+    conn = sqlite3.connect(db)
+    row = conn.execute(
+        "SELECT replied_at, reply_text FROM outbox WHERE id=?", (rid,)).fetchone()
+    conn.close()
+    assert row[0] is not None and row[1] == "hello there"

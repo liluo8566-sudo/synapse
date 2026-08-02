@@ -995,7 +995,8 @@ class TgLoop:
 
     def _track(self, bot: Bot, chat_id: int,
                text: str = "", msg_date: datetime | None = None,
-               media_type: str = "", count_activity: bool = True) -> None:
+               media_type: str = "", count_activity: bool = True,
+               stamp_receipt: bool = True) -> None:
         self._bot = bot
         self._pending_chat_id = chat_id
         if self._state.chat_id != chat_id:
@@ -1015,7 +1016,8 @@ class TgLoop:
         # bounding the receipt stamp to notes sent at/before this message (F1).
         # `media_type` tags a media-only turn (e.g. "photo").
         if self._is_from_her(chat_id):
-            self._inbound_from_her(text, msg_date=msg_date, media_type=media_type)
+            self._inbound_from_her(text, msg_date=msg_date, media_type=media_type,
+                                   stamp_receipt=stamp_receipt)
 
     def _is_from_her(self, chat_id: int | None) -> bool:
         """Net-new sender-identity check: inbound chat_id == the authorized
@@ -1027,14 +1029,17 @@ class TgLoop:
         )
 
     def _inbound_from_her(self, text: str = "", msg_date: datetime | None = None,
-                          media_type: str = "") -> None:
+                          media_type: str = "",
+                          stamp_receipt: bool = True) -> None:
         """Her message landed on tg -> claim any armed watches on tg (one kick).
         Never raises; no-ops without kick_cmd. Reply path claims instantly (no
         other DB query). `text` = her reply body, attached to the reply kick; a
         media-only reply (no extractable text) substitutes "[<media_type>]" (or
         the config placeholder when the type is unknown) so the reason line
         never renders an empty quote. `msg_date` bounds the receipt stamp to
-        notes sent at/before this message (F1: same-poll-batch false stamp)."""
+        notes sent at/before this message (F1: same-poll-batch false stamp).
+        `stamp_receipt` skips the receipt stamp for registry-handled commands
+        (slash commands consumed by the registry must not pollute the receipt)."""
         db = self._outbox_db()
         kc = self._cfg.outbox_kick_cmd
         caption = text.strip() if text else ""
@@ -1048,7 +1053,7 @@ class TgLoop:
         if msg_date is not None:
             inbound_at = msg_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
-            if db:
+            if db and stamp_receipt:
                 cortex_kick.stamp_receipts(
                     db, "tg", kick_text,
                     text_chars=self._cfg.outbox_receipt_text_chars,
@@ -1119,7 +1124,8 @@ class TgLoop:
         inject = self._registry.pending_rewrite
         self._track(context.bot, update.message.chat_id, text=text,
                      msg_date=update.message.date,
-                     count_activity=(action == "forward" or bool(inject)))
+                     count_activity=(action == "forward" or bool(inject)),
+                     stamp_receipt=(action != "handled"))
 
         if action == "handled":
             if self._queued_extra_bubbles:

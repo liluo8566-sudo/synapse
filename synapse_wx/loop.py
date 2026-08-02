@@ -526,7 +526,8 @@ class MainLoop:
             and from_wxid == self._cfg.target_wxid
         )
 
-    def _inbound_from_her(self, text: str = "", media_type: str = "") -> None:
+    def _inbound_from_her(self, text: str = "", media_type: str = "",
+                          stamp_receipt: bool = True) -> None:
         """Her message landed on wx -> claim any armed watches on wx (one kick).
         Never raises; no-ops without kick_cmd. Reply path claims instantly. `text` =
         her reply body (iLink already merges a caption into the same text item),
@@ -536,7 +537,10 @@ class MainLoop:
         unknown. wx has no native per-message timestamp (verified: absent from
         the iLink payload, code and tests alike) so the F1 receipt bound uses
         this poll tick's wallclock instead — sufficient because the bug is
-        same-poll-batch ordering, not exact send time."""
+        same-poll-batch ordering, not exact send time.
+        `stamp_receipt` skips the receipt stamp when the caller already knows
+        the text is a slash command (checked via startswith before registry
+        dispatch, which runs after this call in the wx tick loop)."""
         db = self._outbox_db()
         kc = self._cfg.outbox_kick_cmd
         caption = text.strip() if text else ""
@@ -548,7 +552,7 @@ class MainLoop:
             kick_text = self._cfg.outbox_kick_media_placeholder
         inbound_at = self._wallclock().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
-            if db:
+            if db and stamp_receipt:
                 cortex_kick.stamp_receipts(
                     db, "wx", kick_text,
                     text_chars=self._cfg.outbox_receipt_text_chars,
@@ -694,7 +698,13 @@ class MainLoop:
             # reply text rides the reply kick (extracted above; "" for media).
             if self._is_from_her(from_wxid):
                 media_type = media_events[0].get("type", "") if media_events else ""
-                self._inbound_from_her(text, media_type=media_type)
+                # Slash-prefixed text may be a registry command — skip the receipt
+                # stamp so handled commands don't pollute the outbox receipt log.
+                # Registry dispatch happens later in the tick loop (after quote
+                # extraction), so we use startswith('/') as a pre-check here.
+                self._inbound_from_her(
+                    text, media_type=media_type,
+                    stamp_receipt=not text.startswith("/"))
             if not text and not media_events:
                 continue
             # E-polish quote (inbound): iLink may carry a `reference` field on
