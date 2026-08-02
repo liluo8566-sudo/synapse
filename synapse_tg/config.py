@@ -10,6 +10,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "synapse-tg" / "config.toml"
+DEFAULT_LOG_PATH = Path.home() / ".config" / "marrow" / "logs" / "synapse-tg" / "synapse-tg.log"
 
 
 @dataclass
@@ -17,6 +18,9 @@ class TgConfig:
     bot_token: str = ""
     cc_path: str = "claude"
     data_dir: Path = field(default_factory=lambda: Path.home() / ".config" / "synapse-tg")
+    # [storage] log_file — empty falls back to DEFAULT_LOG_PATH. A second bot
+    # instance points this at its own file so the two never share a handler.
+    log_file: str = ""
     marrow_bridge: bool = False
     cwd: Path | None = None
     # Seeds BridgeState.model on a bridge that has never been switched. A
@@ -84,15 +88,21 @@ class TgConfig:
     # Empty = follow the OS timezone; set an IANA name to pin it.
     timezone: str = ""
 
-    # Cortex shell (T9). Active iff shell_id is a member of marrow's
-    # [cortex].shells (T7: single source, see shell_active()) — no local
-    # enable flag. Inactive = the resident is a plain relay, exactly as
-    # before: no scheduler task, no silence cycle, no MARROW_CORTEX env.
+    # Cortex shell (T9). Active iff shell_enabled AND shell_id is a member of
+    # marrow's [cortex].shells (T7: single source, see shell_active()).
+    # shell_enabled=false makes this instance a plain relay regardless of
+    # shell_id — required for secondary bot instances, whose default shell_id
+    # ("tg") would otherwise claim the primary's socket and ledger. Inactive =
+    # no scheduler task, no silence cycle, no MARROW_CORTEX env.
+    shell_enabled: bool = True
     shell_id: str = "tg"
     # Ledger shared with marrow (<dir>/<shell>.json) + kick socket. Keep the
     # socket path SHORT: macOS caps an AF_UNIX path at 104 bytes.
     shell_state_dir: str = "~/.config/marrow/state/shells"
     shell_socket: str = "~/.config/marrow/state/shells/tg.sock"
+    # Rendered in the 🔄 transfer receipt when the peer shell cannot be read
+    # off marrow's [cortex].shells.
+    shell_peer_fallback: str = "?"
     # Minutes of user silence before one rendered note turn is fed in.
     # Cross-repo contract: keep in step with cortex's [watchdog].silent_max_min
     # (the cli shell's free-round cycle), also 20.
@@ -124,7 +134,7 @@ class TgConfig:
     shell_context_notify_start: int = 150000
     shell_context_notify_step: int = 50000
 
-    # CWD presets
+    # /cwd presets from [cwd_presets] — display name -> absolute path
     cwd_presets: dict = field(default_factory=dict)
 
     # Ack string overrides from [ack_overrides] — key -> {style -> template}
@@ -148,23 +158,36 @@ class TgConfig:
         protocol files marrow, cortex and this bridge all read."""
         return Path(self.marrow_db).expanduser().parent
 
-    def shell_active(self) -> bool:
-        """Is `shell_id` listed in marrow's [cortex].shells (T7: single
-        source, resolved via marrow_config_dir — same file cortex's
-        shell_enabled() reads)? Missing/unreadable marrow config or missing
-        key -> shell off (standalone-synapse fallback)."""
+    def _cortex_shells(self) -> list[str]:
+        """marrow's [cortex].shells, lowercased (T7: single source, resolved
+        via marrow_config_dir — same file cortex's shell_enabled() reads).
+        Missing/unreadable marrow config or missing key -> empty list."""
         p = self.marrow_config_dir() / "config.toml"
         try:
             if p.is_file():
                 data = tomllib.loads(p.read_bytes().decode("utf-8"))
                 shells = (data.get("cortex") or {}).get("shells")
                 if isinstance(shells, list):
-                    return self.shell_id.strip().lower() in [
-                        str(s).strip().lower() for s in shells
-                    ]
+                    return [str(s).strip().lower() for s in shells]
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, TypeError) as e:
-            logger.warning("shell_active: marrow config read failed (%s) — shell off", e)
-        return False
+            logger.warning("marrow config read failed (%s) — shell off", e)
+        return []
+
+    def shell_active(self) -> bool:
+        """shell_enabled AND `shell_id` listed in marrow's [cortex].shells.
+        Unresolvable -> shell off (standalone-synapse fallback)."""
+        if not self.shell_enabled:
+            return False
+        return self.shell_id.strip().lower() in self._cortex_shells()
+
+    def shell_peer(self) -> str:
+        """The other cortex shell a transfer from this one lands on. Falls
+        back to shell_peer_fallback when [cortex].shells names no other."""
+        me = self.shell_id.strip().lower()
+        for s in self._cortex_shells():
+            if s != me:
+                return s
+        return self.shell_peer_fallback
 
     def effective_allowed_user_ids(self) -> list[int]:
         """Whitelist actually enforced: allowed_user_ids if set, else
@@ -232,15 +255,14 @@ def load_config(path: Path | None = None) -> TgConfig:
 
     cortex = data.get("cortex") or {}
     if isinstance(cortex, dict):
-        if "shell_enabled" in cortex:
-            logger.warning(
-                "[cortex] shell_enabled is ignored — shell activity is now "
-                "driven by marrow's [cortex].shells only")
+        if isinstance(cortex.get("shell_enabled"), bool):
+            cfg.shell_enabled = cortex["shell_enabled"]
         for key, attr in (
             ("shell_id", "shell_id"),
             ("shell_state_dir", "shell_state_dir"),
             ("shell_socket", "shell_socket"),
             ("shell_note_tag", "shell_note_tag"),
+            ("shell_peer_fallback", "shell_peer_fallback"),
             ("fuse_tag", "shell_fuse_tag"),
             ("fuse_prompt_text", "shell_fuse_prompt_text"),
         ):
@@ -307,6 +329,8 @@ def load_config(path: Path | None = None) -> TgConfig:
     if isinstance(storage, dict):
         if isinstance(storage.get("data_dir"), str):
             cfg.data_dir = Path(storage["data_dir"])
+        if isinstance(storage.get("log_file"), str):
+            cfg.log_file = storage["log_file"]
 
     provider_model = provider.get("default_model")
     if isinstance(provider_model, str) and provider_model:

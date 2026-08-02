@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from synapse_core import shell_state
+from synapse_core.sessionend.tracker import SessionTracker
 from synapse_tg.config import TgConfig, load_config
 from synapse_tg.loop import TgLoop
 from synapse_tg.shell import ShellHost, occupancy, parse_wake_at
@@ -148,6 +149,22 @@ def _host(tmp_path, clock, *, feeds=None, **kw):
 
 
 # ── occupancy / ledger parsing ────────────────────────────────────────────────
+
+def test_shell_active_true_when_enabled_and_listed(tmp_path):
+    assert _cfg(tmp_path).shell_active() is True
+
+
+def test_shell_enabled_false_overrides_marrow_shells(tmp_path):
+    assert _cfg(tmp_path, shell_enabled=False).shell_active() is False
+
+
+def test_load_config_parses_shell_enabled(tmp_path):
+    p = tmp_path / "tg.toml"
+    p.write_text('[cortex]\nshell_enabled = false\n')
+    assert load_config(p).shell_enabled is False
+    p.write_text('[cortex]\nshell_id = "tg"\n')
+    assert load_config(p).shell_enabled is True
+
 
 def test_occupancy_sums_the_four_cortex_keys():
     usage = {"input_tokens": 10, "cache_read_input_tokens": 100,
@@ -941,18 +958,13 @@ def test_respawn_clears_persisted_session_id(tmp_path):
     assert saved.get("session_id") is None
 
 
-def test_respawn_clears_sessions_tracker(tmp_path):
-    """shell_respawn must clear sessions.json (mirroring /clear's forget_session
-    call) so a stale sid cannot resurface through IdleFireLoop."""
-    from synapse_core.sessionend.tracker import SessionTracker
-
+def test_respawn_clears_the_session_tracker_like_forget_session(tmp_path):
+    """shell_respawn ends the window the same way /clear does: the per-chat
+    SessionTracker mapping must not survive into the fresh session."""
     cfg = _cfg(tmp_path)
-    sessions_path = tmp_path / "sessions.json"
-    tracker = SessionTracker(state_path=sessions_path)
-    tracker.set("chat-999", "old-sid")
-    assert tracker.get("chat-999") == "old-sid"
-
-    loop = TgLoop(cfg, sessions=tracker)
+    sessions = SessionTracker(state_path=tmp_path / "sessions.json")
+    sessions.set("4242", "old-sid")
+    loop = TgLoop(cfg, sessions=sessions)
     loop._state.session_id = "old-sid"
 
     class _P:
@@ -967,9 +979,11 @@ def test_respawn_clears_sessions_tracker(tmp_path):
 
     loop._provider = _P()
     loop._make_provider = lambda: _P()
+
     loop.shell_respawn()
 
-    assert tracker.snapshot() == {}
+    assert sessions.snapshot() == {}
+    assert loop._state.session_id is None
 
 
 def test_crash_respawn_keeps_session_id_for_resume(tmp_path):
@@ -1442,13 +1456,13 @@ def test_config_parses_the_cortex_section(tmp_path):
     assert cfg.shell_fuse_tokens == 1234
 
 
-def test_config_leftover_shell_enabled_key_warns_not_fatal(tmp_path, caplog):
+def test_config_shell_enabled_true_parses_quietly(tmp_path, caplog):
     p = tmp_path / "config.toml"
     p.write_text('[cortex]\nshell_enabled = true\n')
     with caplog.at_level("WARNING"):
         cfg = load_config(p)
-    assert any("shell_enabled" in r.message for r in caplog.records)
-    assert not hasattr(cfg, "shell_enabled")
+    assert not any("shell_enabled" in r.message for r in caplog.records)
+    assert cfg.shell_enabled is True
 
 
 # ── state file protocol ───────────────────────────────────────────────────────

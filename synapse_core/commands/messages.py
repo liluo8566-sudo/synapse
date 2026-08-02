@@ -280,14 +280,10 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
         "en": "Cwd: {name}",
     },
     "cwd.show": {
-        "cn": (
-            "当前位置 {cur}\n请选择目的地:\n  1 → NY\n  2 → Study\n"
-            "  3 → marrow\n（增减预设见 /help 或咨询家机）"
-        ),
-        "en": (
-            "current: {cur}\npresets:\n  1 → NY\n  2 → Study\n"
-            "  3 → marrow\n(see /help, or ask me to add)"
-        ),
+        # {list} is rendered from [cwd_presets] at call time — never hardcode
+        # preset names here, the config table is the single source of truth.
+        "cn": "当前位置 {cur}\n请选择目的地:\n{list}\n（增减预设见 /help 或咨询家机）",
+        "en": "current: {cur}\npresets:\n{list}\n(see /help, or ask me to add)",
     },
     "cwd.not_found": {
         "cn": "🙅‍♀️此路不通",
@@ -344,6 +340,14 @@ MESSAGES: Final[dict[str, dict[str, str]]] = {
     "shell.rotated_wake": {
         "cn": "🌙 Rotated {min}min {time}",
         "en": "🌙 Rotated {min}min {time}",
+    },
+    "shell.transferred": {
+        "cn": "🔄 Transferred to {shell}",
+        "en": "🔄 Transferred to {shell}",
+    },
+    "shell.transferred_rotated": {
+        "cn": "🔄 Transferred to {shell} · rotated",
+        "en": "🔄 Transferred to {shell} · rotated",
     },
 }
 
