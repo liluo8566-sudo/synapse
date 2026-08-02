@@ -1394,6 +1394,12 @@ class TgLoop:
         messages stay on the InboundBuffer and land in the new session."""
         self._state.session_id = None
         self._session_created_at = None
+        # Mirror the /clear command path: clear sessions.json so a stale sid
+        # cannot resurface via _make_provider on the next ensure_provider call.
+        # Buffer is intentionally kept — queued messages ride into the new session.
+        if self._sessions is not None:
+            for cid in list(self._sessions.snapshot()):
+                self._sessions.forget(cid)
         self._persist_state()
         self._swap_provider(None, None)
         logger.info("shell respawn: fresh session")

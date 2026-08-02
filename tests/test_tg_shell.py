@@ -912,6 +912,99 @@ def test_respawn_drops_session_and_keeps_queued_user_messages(tmp_path):
     assert loop._buffer.flush() == "hello from mid-fuse"
 
 
+def test_respawn_clears_persisted_session_id(tmp_path):
+    """shell_respawn must write session_id=None to bridge_state.json so a
+    bridge restart does not resume the old session via _make_provider."""
+    from synapse_core import bridge_state_store
+
+    cfg = _cfg(tmp_path)
+    loop = TgLoop(cfg)
+    loop._state.session_id = "old-sid"
+    loop._persist_state()
+    assert bridge_state_store.load(loop._state_path).get("session_id") == "old-sid"
+
+    class _P:
+        alive = True
+        session_id = None
+
+        def spawn(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    loop._provider = _P()
+    loop._make_provider = lambda: _P()
+    loop.shell_respawn()
+
+    saved = bridge_state_store.load(loop._state_path)
+    assert saved.get("session_id") is None
+
+
+def test_respawn_clears_sessions_tracker(tmp_path):
+    """shell_respawn must clear sessions.json (mirroring /clear's forget_session
+    call) so a stale sid cannot resurface through IdleFireLoop."""
+    from synapse_core.sessionend.tracker import SessionTracker
+
+    cfg = _cfg(tmp_path)
+    sessions_path = tmp_path / "sessions.json"
+    tracker = SessionTracker(state_path=sessions_path)
+    tracker.set("chat-999", "old-sid")
+    assert tracker.get("chat-999") == "old-sid"
+
+    loop = TgLoop(cfg, sessions=tracker)
+    loop._state.session_id = "old-sid"
+
+    class _P:
+        alive = True
+        session_id = None
+
+        def spawn(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    loop._provider = _P()
+    loop._make_provider = lambda: _P()
+    loop.shell_respawn()
+
+    assert tracker.snapshot() == {}
+
+
+def test_crash_respawn_keeps_session_id_for_resume(tmp_path):
+    """Provider crash (not a rotate/fuse) must keep state.session_id so the
+    next _make_provider can resume the session — crash-recovery must be unaffected
+    by the rotate/fuse clear."""
+    from synapse_core import bridge_state_store
+
+    cfg = _cfg(tmp_path)
+    loop = TgLoop(cfg)
+    loop._state.session_id = "live-sid"
+    loop._persist_state()
+
+    spawned: list = []
+
+    class _P:
+        alive = False
+        session_id = None
+
+        def spawn(self):
+            spawned.append(loop._state.session_id)
+
+        def kill(self):
+            pass
+
+    loop._provider = _P()
+    loop._make_provider = lambda: _P()
+    loop._respawn()
+
+    assert loop._state.session_id == "live-sid"
+    assert spawned == ["live-sid"]
+    saved = bridge_state_store.load(loop._state_path)
+    assert saved.get("session_id") == "live-sid"
+
+
 # ── every window end folds, not just the fuse ─────────────────────────────────
 
 def _turn(host, loop, occ, sid="sess-1"):
