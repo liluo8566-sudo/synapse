@@ -405,12 +405,6 @@ def main() -> int:
             cfg.session_get_effort_command, sid
         ),
     )
-    if cfg.cwd_presets:
-        import synapse_core.commands.registry as _reg
-        _reg._CWD_PRESETS = tuple(
-            v for _, v in sorted(cfg.cwd_presets.items()) if v
-        )
-
     main_loop.set_registry(Registry(cmd_ctx))
 
     def on_sleep() -> None:
