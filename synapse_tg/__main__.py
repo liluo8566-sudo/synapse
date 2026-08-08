@@ -384,15 +384,6 @@ def main() -> int:
     app.job_queue.run_repeating(loop.check_flush, interval=0.5, first=0.5)
     app.job_queue.run_repeating(loop.check_heartbeat, interval=15, first=10)
     app.job_queue.run_repeating(loop.check_qidu_signal, interval=cfg.qidu_signal_poll_interval, first=5)
-    if cfg.chat_id is None:
-        logger.warning("outbox: [tg].chat_id not set — outbound note delivery disabled")
-    else:
-        loop.sweep_outbox_orphans()
-        app.job_queue.run_repeating(
-            loop.outbox_poll,
-            interval=cfg.outbox_poll_interval_s,
-            first=cfg.outbox_poll_interval_s,
-        )
 
     async def _error_handler(update, context):
         if isinstance(context.error, (NetworkError, TimedOut)):

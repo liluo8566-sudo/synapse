@@ -507,9 +507,6 @@ def main() -> int:
         qidu_parser.start()
 
     idle_loop.start()
-    # Fail any crash-orphan 'claimed' wx outbox row before delivery starts —
-    # never resent (duplicate to her phone beats lost).
-    main_loop.sweep_outbox_orphans()
     main_loop.start(boot_resume_sid=boot_resume_sid)
 
     # Pre-warm the typing ticket so the first turn's TypingPing doesn't pay
