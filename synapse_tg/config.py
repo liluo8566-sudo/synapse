@@ -149,6 +149,11 @@ class TgConfig:
     qidu_signal_poll_interval: float = 5.0
     qidu_notebook_dir: str = ""
 
+    # Bark push notifications ([bark] section). Disabled unless bark_push_url set.
+    bark_push_url: str = ""
+    bark_icon: str = ""
+    bark_max_chars: int = 150
+
     def shell_socket_path(self) -> Path:
         return Path(self.shell_socket).expanduser()
 
@@ -405,5 +410,15 @@ def load_config(path: Path | None = None) -> TgConfig:
             val = qidu.get(fname)
             if isinstance(val, int) and val > 0:
                 setattr(cfg, f"qidu_{fname}", val)
+
+    bark = data.get("bark") or {}
+    if isinstance(bark, dict):
+        for toml_key, attr in (("push_url", "bark_push_url"), ("icon", "bark_icon")):
+            val = bark.get(toml_key)
+            if isinstance(val, str):
+                setattr(cfg, attr, val)
+        mc = bark.get("max_chars")
+        if isinstance(mc, int) and not isinstance(mc, bool) and mc > 0:
+            cfg.bark_max_chars = mc
 
     return cfg

@@ -46,6 +46,7 @@ from .media.inbound import (
 from synapse_core import cortex_kick
 from .markdown import gfm_to_tg_html
 from .media.outbound import send_media
+from . import bark as _bark
 from . import outbox
 from .shell import _tzinfo
 from .split import split_for_tg, split_for_tg_typed
@@ -1618,3 +1619,6 @@ class TgLoop:
             await asyncio.sleep(_SEND_GAP_SEC)
         else:
             logger.info("reply delivered: %d bubble(s)", total)
+            asyncio.create_task(
+                _bark.push(self._cfg, self._cfg.assistant_name, response)
+            )

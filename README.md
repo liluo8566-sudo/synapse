@@ -35,6 +35,9 @@ Requires [marrow](https://github.com/Jaynechu/marrow) installed separately.
 - `[qidu] notebook_dir` — optional: syncs a qidu book-server's markdown
   export (highlights/annotations) into a local vault directory, one file
   per book. Empty = disabled.
+- `[bark] push_url` — optional: Bark device URL (https://github.com/Finb/Bark).
+  When set, each assistant reply fires a push notification to the device.
+  `icon` (image URL) and `max_chars` (body truncation, default 150) are optional.
 
 ## Commands
 
