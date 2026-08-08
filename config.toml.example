@@ -11,6 +11,15 @@ token = ""
 # REQUIRED for the outbox feature — without it, note delivery is disabled.
 # chat_id = 123456789
 
+# Group chat access. List the Telegram chat ids (negative integers for groups)
+# whose members are allowed to reach the bot. Empty = no group access (default).
+# group_ids = [-1001234567890]
+
+# Keywords that wake the bot in a group. The bot also wakes on @botusername
+# mentions and direct replies to its own messages. Case-insensitive substring.
+# Empty = never respond in groups (even if group_ids is set).
+# group_mention_keywords = ["hey bot", "!ask"]
+
 [outbox]
 # Bridge scan cadence for pending outbox notes (seconds).
 poll_interval_s = 5
