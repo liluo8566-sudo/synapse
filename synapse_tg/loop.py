@@ -43,7 +43,6 @@ from .media.inbound import (
     materialize_sticker,
     materialize_video,
 )
-from synapse_core import cortex_kick
 from .markdown import gfm_to_tg_html
 from .media.outbound import send_media
 from . import bark as _bark
@@ -1100,16 +1099,6 @@ class TgLoop:
         db = self._outbox_db()
         if not db:
             return
-        # P6 watch_timeout: sent+armed rows past their timeout with no reply in
-        # events -> claim (armed->fired) + one kick each. Single-row UPDATE
-        # resolves any race with a concurrent reply claim (one winner).
-        try:
-            for w in cortex_kick.claim_timeouts(db, "tg"):
-                cortex_kick.kick(
-                    self._cfg.outbox_kick_cmd, "timeout",
-                    note_id=w["id"], minutes=w["minutes"])
-        except Exception as e:
-            logger.warning("watch_timeout kick failed: %s", e)
         rows = outbox.claim_pending(db)
         if not rows:
             return
@@ -1155,10 +1144,7 @@ class TgLoop:
         outbox.mark_sent(db, row_id)
         logger.info("outbox row #%d delivered", row_id)
 
-    def _track(self, bot: Bot, chat_id: int,
-               text: str = "", msg_date: datetime | None = None,
-               media_type: str = "", count_activity: bool = True,
-               stamp_receipt: bool = True,
+    def _track(self, bot: Bot, chat_id: int, count_activity: bool = True,
                is_group: bool = False) -> None:
         self._bot = bot
         # Group messages must not rebind the private reply target so that
@@ -1178,15 +1164,6 @@ class TgLoop:
         # idle cycle — only private messages from the owner do (bug 8).
         if count_activity and not is_group and self._shell is not None:
             self._shell.on_user_message()
-        # P6: inbound from the authorized recipient drives watch-reply kicks.
-        # Any other chat is ignored here. `text` = the reply body, threaded into
-        # the reply kick so the wakeup note shows WHAT was said (empty for
-        # media-only turns). `msg_date` = Telegram's native message timestamp,
-        # bounding the receipt stamp to notes sent at/before this message (F1).
-        # `media_type` tags a media-only turn (e.g. "photo").
-        if self._is_from_her(chat_id):
-            self._inbound_from_her(text, msg_date=msg_date, media_type=media_type,
-                                   stamp_receipt=stamp_receipt)
 
     def _check_group_gate(self, msg) -> bool:
         """Return True if the message may proceed past the mention gate.
@@ -1217,53 +1194,6 @@ class TgLoop:
             )
             return False
         return True
-
-    def _is_from_her(self, chat_id: int | None) -> bool:
-        """Net-new sender-identity check: inbound chat_id == the authorized
-        [tg].chat_id. Gates the watch/kick paths only."""
-        return (
-            self._cfg.chat_id is not None
-            and chat_id is not None
-            and int(chat_id) == int(self._cfg.chat_id)
-        )
-
-    def _inbound_from_her(self, text: str = "", msg_date: datetime | None = None,
-                          media_type: str = "",
-                          stamp_receipt: bool = True) -> None:
-        """Her message landed on tg -> claim any armed watches on tg (one kick).
-        Never raises; no-ops without kick_cmd. Reply path claims instantly (no
-        other DB query). `text` = her reply body, attached to the reply kick; a
-        media-only reply (no extractable text) substitutes "[<media_type>]" (or
-        the config placeholder when the type is unknown) so the reason line
-        never renders an empty quote. `msg_date` bounds the receipt stamp to
-        notes sent at/before this message (F1: same-poll-batch false stamp).
-        `stamp_receipt` skips the receipt stamp for registry-handled commands
-        (slash commands consumed by the registry must not pollute the receipt)."""
-        db = self._outbox_db()
-        kc = self._cfg.outbox_kick_cmd
-        caption = text.strip() if text else ""
-        if media_type:
-            kick_text = f"[{media_type}] {caption}" if caption else f"[{media_type}]"
-        elif caption:
-            kick_text = caption
-        else:
-            kick_text = self._cfg.outbox_kick_media_placeholder
-        inbound_at = None
-        if msg_date is not None:
-            inbound_at = msg_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        try:
-            if db and stamp_receipt:
-                cortex_kick.stamp_receipts(
-                    db, "tg", kick_text,
-                    text_chars=self._cfg.outbox_receipt_text_chars,
-                    inbound_at=inbound_at)
-            ids = cortex_kick.claim_reply(db, "tg") if db else []
-            if ids:
-                note_id = ids[0] if len(ids) == 1 else ",".join(str(i) for i in ids)
-                cortex_kick.kick(kc, "reply", note_id=note_id, text=kick_text,
-                                 text_chars=self._cfg.outbox_kick_text_chars)
-        except Exception as e:
-            logger.warning("inbound-from-her kick failed: %s", e)
 
     _HB_SIGNAL = heartbeat.SIGNAL_PATH
     _LAST_ACTIVE_PATH = Path.home() / ".config" / "marrow" / "last_active.json"
@@ -1340,10 +1270,8 @@ class TgLoop:
             # synchronous, so no other task can observe the gap.
             action, ack = self._registry.dispatch(text)
             inject = self._registry.pending_rewrite
-        self._track(context.bot, msg.chat_id, text=text,
-                     msg_date=msg.date,
+        self._track(context.bot, msg.chat_id,
                      count_activity=(action == "forward" or bool(inject)),
-                     stamp_receipt=(action != "handled"),
                      is_group=is_group)
 
         if action == "handled":
@@ -1395,9 +1323,7 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        self._track(context.bot, msg.chat_id,
-                     text=msg.caption or "",
-                     msg_date=msg.date, media_type="photo", is_group=is_group)
+        self._track(context.bot, msg.chat_id, is_group=is_group)
         paths = await materialize_photo(context.bot, msg, self._cfg.data_dir)
         if paths:
             instruction = build_read_instruction(paths)
@@ -1414,9 +1340,7 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        self._track(context.bot, msg.chat_id,
-                     text=msg.caption or "",
-                     msg_date=msg.date, media_type="animation", is_group=is_group)
+        self._track(context.bot, msg.chat_id, is_group=is_group)
         path = await materialize_animation(context.bot, msg, self._cfg.data_dir)
         if path:
             instruction = build_read_instruction([path])
@@ -1433,9 +1357,7 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        self._track(context.bot, msg.chat_id,
-                     text=msg.caption or "",
-                     msg_date=msg.date, media_type="document", is_group=is_group)
+        self._track(context.bot, msg.chat_id, is_group=is_group)
         path = await materialize_document(context.bot, msg, self._cfg.data_dir)
         if path:
             instruction = build_read_instruction([path])
@@ -1452,8 +1374,7 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        self._track(context.bot, msg.chat_id,
-                     msg_date=msg.date, media_type="sticker", is_group=is_group)
+        self._track(context.bot, msg.chat_id, is_group=is_group)
         path = await materialize_sticker(context.bot, msg, self._cfg.data_dir)
         if path:
             stk = msg.sticker
@@ -1470,9 +1391,7 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        self._track(context.bot, msg.chat_id,
-                     text=msg.caption or "",
-                     msg_date=msg.date, media_type="video", is_group=is_group)
+        self._track(context.bot, msg.chat_id, is_group=is_group)
         path = await materialize_video(context.bot, msg, self._cfg.data_dir)
         if path:
             instruction = build_read_instruction([path])
