@@ -93,7 +93,7 @@ def test_push_truncates_body():
     assert len(captured) == 1
     body = captured[0]["body"]
     assert body.endswith("…")
-    assert len(body) == 11  # 10 chars + ellipsis
+    assert len(body) == 10  # 9 chars + ellipsis = exactly max_chars
 
 
 def test_push_payload_shape_with_icon():

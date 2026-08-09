@@ -15,9 +15,10 @@ token = ""
 # whose members are allowed to reach the bot. Empty = no group access (default).
 # group_ids = [-1001234567890]
 
-# Keywords that wake the bot in a group. The bot also wakes on @botusername
-# mentions and direct replies to its own messages. Case-insensitive substring.
-# Empty = never respond in groups (even if group_ids is set).
+# Keywords that wake the bot in a group. Case-insensitive substring match.
+# The bot ALSO wakes on @botusername mentions and direct replies to its own
+# messages, regardless of this list.  Empty = no keyword trigger (but
+# @mention and reply-to-bot still wake the bot).
 # group_mention_keywords = ["hey bot", "!ask"]
 
 # Afterglow window (seconds). After the bot sends any message to a group,

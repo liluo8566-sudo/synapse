@@ -255,12 +255,17 @@ class TgLoop:
             )
         self._user_initiated_close = False
         self._msg_id_cache: collections.OrderedDict[int, str] = collections.OrderedDict()
-        # Per-turn group reply target: set when a group message triggers a
-        # buffer flush; check_flush delivers to this id and clears it.
-        self._group_reply_chat_id: int | None = None
+        # Routing: private messages use _buffer (accessed via _private_buffer
+        # property); each group chat gets its own InboundBuffer so private and
+        # group content never merge in one debounce window (bug 2) and routing
+        # travels with the message through buffer, flush, and retry (bugs 1, 4).
+        self._group_buffers: dict[int, InboundBuffer] = {}
         # Afterglow tracking: monotonic timestamp of last outbound message per
         # group chat_id. Used by the mention gate's afterglow window.
         self._last_outbound: dict[int, float] = {}
+        # Strong references to in-flight asyncio tasks so they are not GC'd
+        # before completion (bug 9).
+        self._bg_tasks: set[asyncio.Task] = set()
         # Resident idle listener: drains unsolicited (background-task) turns
         # between sends so they never rot in the stdout queue and mispair.
         self._listener_stop = asyncio.Event()
@@ -274,6 +279,16 @@ class TgLoop:
         # A transfer(rotate=True) owns the rotation it triggers: its combined
         # receipt is already queued, so the rotate path must not add a 🌙.
         self._transfer_rotate_pending = False
+
+    @property
+    def _private_buffer(self) -> InboundBuffer:
+        """Private-chat inbound buffer (alias for _buffer, kept separate from
+        per-group buffers in _group_buffers so origins never mix)."""
+        return self._buffer
+
+    @_private_buffer.setter
+    def _private_buffer(self, value: InboundBuffer) -> None:
+        self._buffer = value
 
     def attach_shell(self, shell) -> None:
         self._shell = shell
@@ -348,6 +363,7 @@ class TgLoop:
         self._state.session_id = None
         self._death_count = 0
         self._buffer = InboundBuffer()
+        self._group_buffers.clear()
         if self._sessions is not None:
             for cid in list(self._sessions.snapshot()):
                 self._sessions.forget(cid)
@@ -1007,8 +1023,8 @@ class TgLoop:
         logger.info("respawn_with_resume sid=%s model=%s (resume=%s)", sid, model, use_resume)
 
     def replay_user_text(self, text: str) -> None:
-        """Enqueue text on the inbound buffer for the next flush cycle."""
-        self._buffer.add(text)
+        """Enqueue text on the private inbound buffer for the next flush cycle."""
+        self._private_buffer.add(text)
 
     def get_status(self) -> dict:
         """Return current bridge status for /info display."""
@@ -1149,8 +1165,9 @@ class TgLoop:
         # cancels a booked wake only when it actually reaches the LLM. Text
         # turns count a "forward" verdict or an injected rewrite; anything the
         # registry consumes without injecting leaves a scheduled wake standing.
-        # Media turns always count.
-        if count_activity and self._shell is not None:
+        # Media turns always count.  Group messages must not reset the owner's
+        # idle cycle — only private messages from the owner do (bug 8).
+        if count_activity and not is_group and self._shell is not None:
             self._shell.on_user_message()
         # P6: inbound from the authorized recipient drives watch-reply kicks.
         # Any other chat is ignored here. `text` = the reply body, threaded into
@@ -1165,12 +1182,16 @@ class TgLoop:
     def _check_group_gate(self, msg) -> bool:
         """Return True if the message may proceed past the mention gate.
 
-        For private messages always True.  For group/supergroup messages,
-        applies _passes_mention_gate; if it passes, records the group chat_id
-        as the per-turn reply target so check_flush delivers there.  Does NOT
-        rebind _pending_chat_id or state.chat_id."""
+        For private messages always True.  When group_ids is empty (feature
+        off), also returns True immediately to restore pre-PR behaviour (bug 6).
+        For group/supergroup messages in an enabled group, applies
+        _passes_mention_gate.  Does NOT set routing state here — routing is
+        resolved at flush time from the per-group buffer (bugs 1, 4)."""
         chat = msg.chat
         if chat.type not in ("group", "supergroup"):
+            return True
+        # Group feature off: treat like a normal private message (bug 6).
+        if not self._cfg.group_ids:
             return True
         bot_username = self._bot.username if self._bot is not None else None
         bot_id = self._bot.id if self._bot is not None else None
@@ -1186,7 +1207,6 @@ class TgLoop:
                 chat.id, getattr(msg.from_user, "id", None),
             )
             return False
-        self._group_reply_chat_id = chat.id
         return True
 
     def _is_from_her(self, chat_id: int | None) -> bool:
@@ -1262,7 +1282,7 @@ class TgLoop:
             self._HB_SIGNAL.unlink(missing_ok=True)
         except Exception:
             return
-        self._buffer.add(heartbeat.build_prompt(data))
+        self._private_buffer.add(heartbeat.build_prompt(data))
         logger.info("heartbeat injected (anomalies=%d)", len(data.get("anomalies", [])))
 
     async def check_qidu_signal(self, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1278,7 +1298,14 @@ class TgLoop:
             return
         texts = await asyncio.to_thread(self._qidu_signal.fetch)
         for text in texts:
-            self._buffer.add(text)
+            self._private_buffer.add(text)
+
+    def _is_owner(self, from_uid: int | None) -> bool:
+        """True if the sender is the configured owner (allowed_user_ids or chat_id)."""
+        if from_uid is None:
+            return False
+        ids = self._cfg.effective_allowed_user_ids()
+        return int(from_uid) in ids
 
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or update.message.text is None:
@@ -1290,12 +1317,20 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        # Dispatch before _track: its verdict plus any pending rewrite tells a
-        # message that feeds the LLM apart from one the registry only consumes.
-        # Nothing inside dispatch reads the bot/chat_id _track binds. Both are
-        # synchronous, so no other task can observe the gap.
-        action, ack = self._registry.dispatch(text)
-        inject = self._registry.pending_rewrite
+        # Command dispatch: only the owner may run slash-commands (bug 3).
+        # Non-owner group messages are forwarded to the LLM without dispatch.
+        _fu = getattr(msg, "from_user", None)
+        from_uid = getattr(_fu, "id", None) if _fu else None
+        if is_group and not self._is_owner(from_uid):
+            action, ack = "forward", None
+            inject = None
+        else:
+            # Dispatch before _track: its verdict plus any pending rewrite tells a
+            # message that feeds the LLM apart from one the registry only consumes.
+            # Nothing inside dispatch reads the bot/chat_id _track binds. Both are
+            # synchronous, so no other task can observe the gap.
+            action, ack = self._registry.dispatch(text)
+            inject = self._registry.pending_rewrite
         self._track(context.bot, msg.chat_id, text=text,
                      msg_date=msg.date,
                      count_activity=(action == "forward" or bool(inject)),
@@ -1315,7 +1350,7 @@ class TgLoop:
             if ack:
                 await msg.reply_text(ack)
             if inject:
-                self._buffer.add(inject)
+                self._private_buffer.add(inject)
             return
 
         quote_prefix = ""
@@ -1325,11 +1360,24 @@ class TgLoop:
             quote_prefix = f'[quoting: "{quoted}"]\n'
         meta = _chat_meta(msg)
         full = f"{meta}{quote_prefix}{text}" if meta else f"{quote_prefix}{text}"
-        self._buffer.add(full)
+        # Route to per-origin buffer so private and group content never merge
+        # in the same debounce window (bug 2); routing travels with the message
+        # through flush and retry (bugs 1, 4).
+        if is_group:
+            buf = self._group_buffers.setdefault(msg.chat_id, InboundBuffer())
+            buf.add(full)
+        else:
+            self._private_buffer.add(full)
         logger.info("inbound: %r (len=%d)", text[:60], len(text))
         self._msg_id_cache[msg.message_id] = text
         if len(self._msg_id_cache) > 50:
             self._msg_id_cache.popitem(last=False)
+
+    def _buf_for(self, chat_id: int, is_group: bool) -> InboundBuffer:
+        """Return the correct buffer for this message's origin."""
+        if is_group:
+            return self._group_buffers.setdefault(chat_id, InboundBuffer())
+        return self._private_buffer
 
     async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or not update.message.photo:
@@ -1347,7 +1395,7 @@ class TgLoop:
             caption = (msg.caption or "").strip()
             cmeta = _chat_meta(msg)
             body = f"{caption}\n{instruction}" if caption else instruction
-            self._buffer.add(f"{cmeta}{body}" if cmeta else body)
+            self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered photo: %s", paths)
 
     async def on_animation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1366,7 +1414,7 @@ class TgLoop:
             caption = (msg.caption or "").strip()
             cmeta = _chat_meta(msg)
             body = f"{caption}\n{instruction}" if caption else instruction
-            self._buffer.add(f"{cmeta}{body}" if cmeta else body)
+            self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered animation: %s", path)
 
     async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1385,7 +1433,7 @@ class TgLoop:
             caption = (msg.caption or "").strip()
             cmeta = _chat_meta(msg)
             body = f"{caption}\n{instruction}" if caption else instruction
-            self._buffer.add(f"{cmeta}{body}" if cmeta else body)
+            self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered document: %s", path)
 
     async def on_sticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1403,7 +1451,7 @@ class TgLoop:
             cmeta = _chat_meta(msg)
             stk_meta = f"[sticker: emoji={stk.emoji or '?'}, set={stk.set_name or 'none'}]"
             instruction = build_read_instruction([path])
-            self._buffer.add(f"{cmeta}{stk_meta}\n{instruction}" if cmeta else f"{stk_meta}\n{instruction}")
+            self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{stk_meta}\n{instruction}" if cmeta else f"{stk_meta}\n{instruction}")
             logger.debug("buffered sticker: %s", path)
 
     async def on_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1422,7 +1470,7 @@ class TgLoop:
             caption = (msg.caption or "").strip()
             cmeta = _chat_meta(msg)
             body = f"{caption}\n{instruction}" if caption else instruction
-            self._buffer.add(f"{cmeta}{body}" if cmeta else body)
+            self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered video: %s", path)
 
     async def _send_text_bubble(self, bot: Bot, send_kwargs: dict, fallback_kwargs: dict) -> bool:
@@ -1465,43 +1513,21 @@ class TgLoop:
             logger.warning("plain-text fallback send also failed: %s", e)
             return False
 
-    async def check_flush(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if self._bot is None:
-            self._bot = context.bot
-        # A group-sourced turn delivers back to that group; private turns use
-        # _pending_chat_id.  We need at least one of the two to be set.
-        # Check readiness BEFORE consuming group_target so debounce ticks that
-        # return early don't clear the group routing for the eventual flush.
-        if not self._buffer.ready():
-            return
-        group_target = self._group_reply_chat_id
-        effective_chat_id = group_target if group_target is not None else self._pending_chat_id
-        if effective_chat_id is None:
-            return
-        # Consume group target now — it is one-shot per flushed turn.
-        self._group_reply_chat_id = None
-        bot = self._bot or context.bot
-        chat_id = effective_chat_id
-        body = self._buffer.flush()
+    async def _flush_one(self, bot, chat_id: int, buf: InboundBuffer) -> None:
+        """Flush one ready buffer to the given chat_id.  Routing is fully
+        determined by which buffer fired and its associated chat_id — the
+        global _group_reply_chat_id flag is no longer used (bugs 1, 2, 4)."""
+        body = buf.flush()
         if not body:
-            # Buffer was ready but empty (e.g. whitespace-only); group target
-            # already cleared above — nothing to deliver, nothing to preserve.
             return
 
         logger.info("flush: %r", body[:120])
         typing = TypingAction(bot, chat_id)
 
-        # Shell receipts raised anywhere in this cycle (💤 / 🔄 tool_use, a
-        # rotate kick landing mid-turn) wait for the finally below, so they
-        # land under the reply text instead of above it.
         self._notice_defer += 1
         try:
             async with self._lock:
                 try:
-                    # Retry-once: on a mid-turn stall/death, respawn resuming the
-                    # same sid and re-send the SAME body ONCE. Second failure ->
-                    # user-facing notice. Bridges emit outbound only from completed
-                    # events, so a retried turn double-sends nothing.
                     response = thinking = None
                     for attempt in range(2):
                         try:
@@ -1528,8 +1554,9 @@ class TgLoop:
                                 return
                             if attempt == 0:
                                 continue
-                            # Second failure: hand back to the buffer + notice.
-                            self._buffer.prepend(body)
+                            # Second failure: hand back to the SAME origin buffer
+                            # so the retry routes back to the correct chat_id (bug 4).
+                            buf.prepend(body)
                             await self._send_provider_notice(bot, chat_id, "provider.restarting")
                             return
                 except Exception as e:
@@ -1539,22 +1566,30 @@ class TgLoop:
                 finally:
                     typing.stop()
 
-            # Turn output cap: the provider interrupted a runaway turn (brake, not
-            # a failure — no retry). Notify the user; the partial reply below still
-            # ships. Notice fires once per capped turn.
             if self._provider is not None and getattr(
                 self._provider, "turn_output_capped", False
             ):
                 await self._send_provider_notice(bot, chat_id, "provider.turn_capped")
 
-            # Reply always ships. Messages that arrived mid-turn stayed in the
-            # InboundBuffer (never drained) and become the next turn — no merge,
-            # no reply-drop.
             await self._deliver_reply(bot, chat_id, response, thinking)
         finally:
             self._notice_defer -= 1
             await self._flush_notices(bot, chat_id)
         await self._shell_after_turn()
+
+    async def check_flush(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self._bot is None:
+            self._bot = context.bot
+        bot = self._bot or context.bot
+
+        # Flush private buffer first.
+        if self._private_buffer.ready() and self._pending_chat_id is not None:
+            await self._flush_one(bot, self._pending_chat_id, self._private_buffer)
+
+        # Flush any ready group buffers independently.
+        for group_chat_id, gbuf in list(self._group_buffers.items()):
+            if gbuf.ready():
+                await self._flush_one(bot, group_chat_id, gbuf)
 
     async def _shell_after_turn(self) -> None:
         """Hand a completed turn to the cortex shell host (token ledger + fuse).
@@ -1757,6 +1792,9 @@ class TgLoop:
             await asyncio.sleep(_SEND_GAP_SEC)
         else:
             logger.info("reply delivered: %d bubble(s)", total)
-            asyncio.create_task(
+            task = asyncio.create_task(
                 _bark.push(self._cfg, self._cfg.assistant_name, response)
             )
+            # Keep a strong reference so the task is not GC'd mid-flight (bug 9).
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)

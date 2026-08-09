@@ -24,7 +24,7 @@ async def push(cfg: "TgConfig", title: str, body: str) -> None:
         return
 
     if len(body) > cfg.bark_max_chars:
-        body = body[: cfg.bark_max_chars] + "…"
+        body = body[: cfg.bark_max_chars - 1] + "…"
 
     payload: dict = {"title": title, "body": body}
     if cfg.bark_icon:

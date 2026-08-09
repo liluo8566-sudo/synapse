@@ -123,13 +123,16 @@ def test_whitelist_filter_includes_group_chat_filter():
 
 
 def test_whitelist_filter_group_only_no_user_whitelist():
-    """group_ids set but no allowed_user_ids — filter is chat-only."""
+    """group_ids set but no allowed_user_ids — filter admits group + private.
+    Bug 5: returning the group filter alone silently blocks all private chats,
+    so the fix ORs in ChatType.PRIVATE to preserve private-chat access."""
     cfg = TgConfig(group_ids=[-100123])
     f = _whitelist_filter(cfg)
     assert f is not None
-    # chat_ids attribute on a Chat filter
-    assert hasattr(f, "chat_ids")
-    assert frozenset([-100123]) == f.chat_ids
+    # Result is a combined OR filter (group | PRIVATE), not a bare Chat filter.
+    assert not hasattr(f, "chat_ids"), (
+        "filter should not be a bare Chat filter — private chats would be blocked"
+    )
 
 
 def test_whitelist_filter_none_when_neither_set():
@@ -214,7 +217,8 @@ def test_owner_in_group_blocked_without_mention(tmp_path):
     )
     result = loop._check_group_gate(msg)
     assert result is False
-    assert loop._group_reply_chat_id is None
+    # Routing is now per-buffer, not a global flag.
+    assert -100123 not in loop._group_buffers
 
 
 def test_owner_in_group_passes_with_keyword(tmp_path):
@@ -230,7 +234,6 @@ def test_owner_in_group_passes_with_keyword(tmp_path):
     )
     result = loop._check_group_gate(msg)
     assert result is True
-    assert loop._group_reply_chat_id == -100123
 
 
 # ---------------------------------------------------------------------------
@@ -280,20 +283,21 @@ def test_private_message_rebinds_pending_chat_id(tmp_path):
 # 7. check_group_gate sets _group_reply_chat_id only on pass
 # ---------------------------------------------------------------------------
 
-def test_check_group_gate_sets_reply_target_on_pass(tmp_path):
+def test_check_group_gate_passes_keyword(tmp_path):
+    """Gate returns True for keyword hit; routing is now per-buffer not a flag."""
     loop = _loop(tmp_path)
     loop._bot = _FakeBot()
     msg = _msg(text="hey bot question", chat_type="group", chat_id=-100123)
     assert loop._check_group_gate(msg) is True
-    assert loop._group_reply_chat_id == -100123
 
 
-def test_check_group_gate_does_not_set_reply_target_on_block(tmp_path):
+def test_check_group_gate_blocks_noise(tmp_path):
+    """Gate returns False for unmatched group message; no buffer created."""
     loop = _loop(tmp_path)
     loop._bot = _FakeBot()
     msg = _msg(text="just noise", chat_type="group", chat_id=-100123)
     assert loop._check_group_gate(msg) is False
-    assert loop._group_reply_chat_id is None
+    assert -100123 not in loop._group_buffers
 
 
 # ---------------------------------------------------------------------------
@@ -317,11 +321,12 @@ def test_on_message_group_gated_out_does_not_buffer(tmp_path):
 
     asyncio.run(loop.on_message(update, ctx))
 
-    assert len(loop._buffer) == 0
+    assert len(loop._private_buffer) == 0
+    assert not loop._group_buffers
     assert loop._pending_chat_id == 777  # unchanged
 
 
-def test_on_message_group_keyword_hit_buffers_and_sets_group_reply(tmp_path):
+def test_on_message_group_keyword_hit_buffers_into_group_buffer(tmp_path):
     loop = _loop(tmp_path)
     bot = _FakeBot()
     loop._bot = bot
@@ -337,10 +342,10 @@ def test_on_message_group_keyword_hit_buffers_and_sets_group_reply(tmp_path):
 
     asyncio.run(loop.on_message(update, ctx))
 
-    # buffer has something (quiet window may not have elapsed, use len)
-    assert len(loop._buffer) > 0
-    # group reply target set
-    assert loop._group_reply_chat_id == -100123
+    # message went into the group buffer, not the private buffer
+    assert -100123 in loop._group_buffers
+    assert len(loop._group_buffers[-100123]) > 0
+    assert len(loop._private_buffer) == 0
     # private target unchanged
     assert loop._pending_chat_id == 777
 
@@ -360,9 +365,9 @@ def test_on_message_private_unaffected_by_group_gate(tmp_path):
 
     asyncio.run(loop.on_message(update, ctx))
 
-    assert len(loop._buffer) > 0
+    assert len(loop._private_buffer) > 0
     assert loop._pending_chat_id == 42
-    assert loop._group_reply_chat_id is None
+    assert not loop._group_buffers  # no group buffer created
 
 
 # ---------------------------------------------------------------------------
@@ -384,9 +389,9 @@ class _FakeSendable:
         pass
 
 
-def test_check_flush_preserves_group_target_while_buffer_not_ready(tmp_path):
-    """_group_reply_chat_id must survive check_flush ticks that return early
-    because the debounce quiet-window hasn't elapsed yet."""
+def test_check_flush_routes_group_buffer_to_group_chat(tmp_path):
+    """Group messages buffered in _group_buffers must flush to the group chat_id,
+    not the private chat.  Per-origin buffers survive early ticks until ready."""
     from synapse_core.debounce import InboundBuffer
 
     tick = [0.0]
@@ -395,29 +400,26 @@ def test_check_flush_preserves_group_target_while_buffer_not_ready(tmp_path):
     loop = _loop(tmp_path)
     bot = _FakeSendable()
     loop._bot = bot
-    # Inject a controllable clock into the buffer so we can hold it not-ready.
-    loop._buffer = InboundBuffer(clock=clock)
     loop._pending_chat_id = 777  # private chat — must NOT be used for group reply
 
-    # Simulate a group message that passes the gate.
-    loop._group_reply_chat_id = -100123
-    loop._buffer.add("!ask something")  # ts = 0.0
+    # Simulate a group message landed in the group buffer.
+    gbuf = InboundBuffer(clock=clock)
+    gbuf.add("!ask something")  # ts = 0.0
+    loop._group_buffers[-100123] = gbuf
 
     ctx = _FakeContext(bot)
 
     # Tick 1: quiet window hasn't elapsed (time still 0.0, need >=5.0).
     asyncio.run(loop.check_flush(ctx))
-    # Group target must survive — not consumed by an early return.
-    assert loop._group_reply_chat_id == -100123, (
-        "_group_reply_chat_id was cleared before buffer was ready"
+    # Group buffer should still have content — not flushed yet.
+    assert len(loop._group_buffers[-100123]) > 0, (
+        "group buffer was flushed before quiet window elapsed"
     )
+    assert len(bot.sent) == 0
 
     # Tick 2: advance clock past the quiet window so buffer.ready() is True.
     tick[0] = 6.0
     asyncio.run(loop.check_flush(ctx))
-
-    # Group target should now be consumed (one-shot).
-    assert loop._group_reply_chat_id is None
 
     # The reply must have gone to the group, not the private chat.
     assert len(bot.sent) > 0, "No message was sent on flush"
@@ -565,3 +567,124 @@ def test_config_parses_forward_allow_ids(tmp_path):
 def test_config_forward_allow_ids_default_empty():
     from synapse_tg.config import TgConfig
     assert TgConfig().group_forward_allow_ids == []
+
+
+# ---------------------------------------------------------------------------
+# 13. Bug fixes: routing isolation, command gate, group_ids off
+# ---------------------------------------------------------------------------
+
+def test_private_and_group_use_separate_buffers(tmp_path):
+    """Private and group messages must never mix in the same debounce window
+    (bug 2): each origin gets its own InboundBuffer."""
+    from synapse_core.debounce import InboundBuffer
+    loop = _loop(tmp_path)
+    loop._bot = _FakeBot()
+    loop._pending_chat_id = 777
+
+    # Private message
+    private_msg = _msg(text="hello private", chat_type="private", chat_id=777)
+    update_p = types.SimpleNamespace(message=private_msg)
+    ctx = _FakeContext(loop._bot)
+    asyncio.run(loop.on_message(update_p, ctx))
+
+    # Group message
+    group_msg = _msg(text="!ask group", chat_type="group", chat_id=-100123)
+    update_g = types.SimpleNamespace(message=group_msg)
+    asyncio.run(loop.on_message(update_g, ctx))
+
+    # They must be in separate buffers.
+    assert len(loop._private_buffer) == 1
+    assert -100123 in loop._group_buffers
+    assert len(loop._group_buffers[-100123]) == 1
+
+
+def test_non_owner_group_command_not_dispatched(tmp_path):
+    """A non-owner group member sending a slash command must not trigger
+    command dispatch against the owner's session (bug 3)."""
+    from synapse_tg.config import TgConfig
+    from synapse_tg.loop import TgLoop
+    cfg = TgConfig(
+        data_dir=tmp_path / "tg-data",
+        group_ids=[-100123],
+        allowed_user_ids=[1],  # owner is uid 1
+        group_mention_keywords=["!ask"],
+    )
+    loop = TgLoop(cfg)
+    loop._bot = _FakeBot()
+    dispatched = []
+    _orig_dispatch = loop._registry.dispatch
+    def _spy(text):
+        dispatched.append(text)
+        return _orig_dispatch(text)
+    loop._registry.dispatch = _spy
+
+    # Non-owner (uid=99) sends @mention with a slash-command
+    msg = _msg(
+        text="@mybot /reset",
+        chat_type="group",
+        chat_id=-100123,
+        from_uid=99,
+    )
+    msg.forward_origin = None
+    update = types.SimpleNamespace(message=msg)
+    ctx = _FakeContext(loop._bot)
+    asyncio.run(loop.on_message(update, ctx))
+
+    # dispatch should NOT have been called for the non-owner
+    assert "/reset" not in dispatched or not any("/reset" == d for d in dispatched), (
+        "Non-owner /reset was dispatched against the owner session"
+    )
+
+
+def test_check_group_gate_short_circuits_when_group_ids_empty(tmp_path):
+    """When group_ids is empty (feature off), _check_group_gate must return
+    True for all group messages — restoring pre-PR behaviour (bug 6)."""
+    from synapse_tg.config import TgConfig
+    from synapse_tg.loop import TgLoop
+    cfg = TgConfig(
+        data_dir=tmp_path / "tg-data",
+        group_ids=[],  # feature off
+        group_mention_keywords=["hey bot"],
+    )
+    loop = TgLoop(cfg)
+    loop._bot = _FakeBot()
+
+    # Any group message should pass regardless of mention gate.
+    msg = _msg(text="just chatting, no keyword", chat_type="group", chat_id=-100456)
+    assert loop._check_group_gate(msg) is True
+
+
+def test_group_message_does_not_reset_owner_idle_cycle(tmp_path):
+    """Gated group messages must not call shell.on_user_message (bug 8)."""
+    fired = []
+
+    class _FakeShell:
+        def on_user_message(self):
+            fired.append(True)
+
+    loop = _loop(tmp_path)
+    loop._bot = _FakeBot()
+    loop._shell = _FakeShell()
+    loop._pending_chat_id = 777
+
+    # Group message that passes gate
+    group_msg = _msg(text="!ask something", chat_type="group", chat_id=-100123)
+    update = types.SimpleNamespace(message=group_msg)
+    ctx = _FakeContext(loop._bot)
+    asyncio.run(loop.on_message(update, ctx))
+
+    assert not fired, "on_user_message should not fire for group messages"
+
+
+def test_whitelist_filter_group_ids_only_admits_private(tmp_path):
+    """With group_ids set but no user whitelist, private chats must not be
+    silently blocked (bug 5)."""
+    from synapse_tg.__main__ import _whitelist_filter
+    cfg = TgConfig(group_ids=[-100123])
+    f = _whitelist_filter(cfg)
+    # The filter must accept private chats.
+    assert f is not None
+    # Verify by checking it's not purely a Chat filter (which would block private).
+    assert not hasattr(f, "chat_ids"), (
+        "Bare Chat filter would block all private chats"
+    )

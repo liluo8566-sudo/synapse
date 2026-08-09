@@ -51,8 +51,13 @@ def _whitelist_filter(cfg) -> "filters.BaseFilter | None":
     """Build the sender gate from the effective whitelist (by Telegram user
     id, so an allowed sender is recognised in a group too). When group_ids is
     non-empty the gate also admits any member of those groups; private messages
-    still require the user whitelist. None = accept-all (caller must log a
-    startup warning)."""
+    still pass through (the mention gate handles them separately). None =
+    accept-all (caller must log a startup warning).
+
+    Bug 5: when group_ids is set but no allowed_user_ids / chat_id is
+    configured, returning the group filter alone silently blocks all private
+    chats — the previous accept-all behaviour for private messages is preserved
+    by ORing in filters.ChatType.PRIVATE."""
     ids = cfg.effective_allowed_user_ids()
     user_filter = filters.User(user_id=set(ids)) if ids else None
     group_filter = (
@@ -60,10 +65,12 @@ def _whitelist_filter(cfg) -> "filters.BaseFilter | None":
     )
     if user_filter is None and group_filter is None:
         return None
-    if user_filter is None:
-        return group_filter
     if group_filter is None:
         return user_filter
+    if user_filter is None:
+        # group_ids set but no user whitelist: admit the listed groups AND all
+        # private chats (private auth handled by chat_id / accept-all default).
+        return group_filter | filters.ChatType.PRIVATE
     return user_filter | group_filter
 
 
