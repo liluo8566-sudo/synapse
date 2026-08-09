@@ -83,6 +83,13 @@ class TgConfig:
     # @-mentioned, OR the message replies to one of the bot's own messages.
     group_ids: list = field(default_factory=list)
     group_mention_keywords: list = field(default_factory=list)
+    # Afterglow window (seconds). If the bot sent a message to a group within
+    # this many seconds ago, all subsequent messages from that group pass the
+    # gate. 0 = disabled (default).
+    group_afterglow_sec: float = 0.0
+    # Forwarded-message allowlist. If a message is a forward AND its sender's
+    # user id is in this list, it passes the gate regardless of keywords.
+    group_forward_allow_ids: list = field(default_factory=list)
 
     # Watch + kick (P6). kick_cmd = cortex.kick launcher (venv python + module),
     # e.g. ["/path/.venv/bin/python", "-m", "cortex.kick"]. Empty = watch/kick off.
@@ -249,6 +256,14 @@ def load_config(path: Path | None = None) -> TgConfig:
         if isinstance(gmk, list):
             cfg.group_mention_keywords = [
                 str(x) for x in gmk if isinstance(x, str)
+            ]
+        gas = tg.get("group_afterglow_sec")
+        if isinstance(gas, (int, float)) and not isinstance(gas, bool) and gas >= 0:
+            cfg.group_afterglow_sec = float(gas)
+        gfa = tg.get("group_forward_allow_ids")
+        if isinstance(gfa, list):
+            cfg.group_forward_allow_ids = [
+                x for x in gfa if isinstance(x, int) and not isinstance(x, bool)
             ]
 
     outbox = data.get("outbox") or {}

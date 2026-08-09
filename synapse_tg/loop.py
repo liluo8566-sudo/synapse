@@ -111,10 +111,18 @@ def _chat_meta(msg) -> str:
 
 
 def _passes_mention_gate(
-    msg, bot_username: str | None, bot_id: int | None, keywords: list[str]
+    msg,
+    bot_username: str | None,
+    bot_id: int | None,
+    keywords: list[str],
+    *,
+    afterglow_sec: float = 0.0,
+    last_outbound: "dict[int, float] | None" = None,
+    forward_allow_ids: "list[int] | None" = None,
 ) -> bool:
-    """Group mention gate: accept iff keyword hit, @botusername mention, or
-    reply to a bot message. Returns True for private messages (gate N/A)."""
+    """Group mention gate: accept iff keyword hit, @botusername mention,
+    reply to a bot message, within afterglow window, or forwarded from an
+    allowed user. Returns True for private messages (gate N/A)."""
     chat = msg.chat
     if chat.type not in ("group", "supergroup"):
         return True
@@ -134,6 +142,21 @@ def _passes_mention_gate(
         and reply.from_user is not None
         and bot_id is not None
         and reply.from_user.id == bot_id
+    ):
+        return True
+    # (d) afterglow window: bot recently sent a message to this chat
+    if (
+        afterglow_sec > 0
+        and last_outbound is not None
+        and (time.monotonic() - last_outbound.get(chat.id, 0.0)) < afterglow_sec
+    ):
+        return True
+    # (e) forwarded message from an allowed user id
+    if (
+        forward_allow_ids
+        and getattr(msg, "forward_origin", None) is not None
+        and msg.from_user is not None
+        and msg.from_user.id in forward_allow_ids
     ):
         return True
     return False
@@ -235,6 +258,9 @@ class TgLoop:
         # Per-turn group reply target: set when a group message triggers a
         # buffer flush; check_flush delivers to this id and clears it.
         self._group_reply_chat_id: int | None = None
+        # Afterglow tracking: monotonic timestamp of last outbound message per
+        # group chat_id. Used by the mention gate's afterglow window.
+        self._last_outbound: dict[int, float] = {}
         # Resident idle listener: drains unsolicited (background-task) turns
         # between sends so they never rot in the stdout queue and mispair.
         self._listener_stop = asyncio.Event()
@@ -1149,7 +1175,12 @@ class TgLoop:
         bot_username = self._bot.username if self._bot is not None else None
         bot_id = self._bot.id if self._bot is not None else None
         keywords = self._cfg.group_mention_keywords
-        if not _passes_mention_gate(msg, bot_username, bot_id, keywords):
+        if not _passes_mention_gate(
+            msg, bot_username, bot_id, keywords,
+            afterglow_sec=self._cfg.group_afterglow_sec,
+            last_outbound=self._last_outbound,
+            forward_allow_ids=self._cfg.group_forward_allow_ids,
+        ):
             logger.debug(
                 "group gate: dropped (chat=%s, user=%s)",
                 chat.id, getattr(msg.from_user, "id", None),
@@ -1415,11 +1446,21 @@ class TgLoop:
             return False
 
         try:
-            return await _attempt(send_kwargs)
+            ok = await _attempt(send_kwargs)
+            if ok:
+                cid = send_kwargs.get("chat_id")
+                if cid is not None:
+                    self._last_outbound[cid] = time.monotonic()
+            return ok
         except Exception as e:
             logger.warning("send_message failed, trying plain-text fallback: %s", e)
         try:
-            return await _attempt(fallback_kwargs)
+            ok = await _attempt(fallback_kwargs)
+            if ok:
+                cid = fallback_kwargs.get("chat_id")
+                if cid is not None:
+                    self._last_outbound[cid] = time.monotonic()
+            return ok
         except Exception as e:
             logger.warning("plain-text fallback send also failed: %s", e)
             return False

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import types
 
 from synapse_tg.__main__ import _whitelist_filter
@@ -424,3 +425,143 @@ def test_check_flush_preserves_group_target_while_buffer_not_ready(tmp_path):
         assert call.get("chat_id") == -100123, (
             f"Message delivered to {call.get('chat_id')!r} instead of group -100123"
         )
+
+
+# ---------------------------------------------------------------------------
+# 10. Afterglow window
+# ---------------------------------------------------------------------------
+
+def _fwd_msg(from_uid=42, chat_type="group", chat_id=-100123, forward_origin=None):
+    """Minimal fake for a forwarded group message."""
+    return types.SimpleNamespace(
+        text="forwarded content",
+        caption=None,
+        chat=types.SimpleNamespace(type=chat_type, title="TestGroup", id=chat_id),
+        chat_id=chat_id,
+        from_user=types.SimpleNamespace(id=from_uid),
+        reply_to_message=None,
+        forward_origin=forward_origin,
+        message_id=2,
+        date=None,
+        sticker=None,
+        photo=None,
+        animation=None,
+        document=None,
+        video=None,
+    )
+
+
+def test_afterglow_disabled_by_default():
+    """group_afterglow_sec=0 must not pass any extra message."""
+    msg = _msg(text="just noise", chat_type="group", chat_id=-100123)
+    last_outbound = {-100123: time.monotonic()}  # just sent
+    assert _passes_mention_gate(
+        msg, "mybot", 999, [],
+        afterglow_sec=0.0,
+        last_outbound=last_outbound,
+    ) is False
+
+
+def test_afterglow_passes_within_window():
+    """Message arrives while the afterglow window is still open."""
+    msg = _msg(text="just noise", chat_type="group", chat_id=-100123)
+    last_outbound = {-100123: time.monotonic() - 5.0}  # 5 s ago
+    assert _passes_mention_gate(
+        msg, "mybot", 999, [],
+        afterglow_sec=60.0,
+        last_outbound=last_outbound,
+    ) is True
+
+
+def test_afterglow_blocks_after_expiry():
+    """Message arrives after the afterglow window has closed."""
+    msg = _msg(text="just noise", chat_type="group", chat_id=-100123)
+    last_outbound = {-100123: time.monotonic() - 120.0}  # 2 min ago
+    assert _passes_mention_gate(
+        msg, "mybot", 999, [],
+        afterglow_sec=60.0,
+        last_outbound=last_outbound,
+    ) is False
+
+
+def test_afterglow_no_prior_send():
+    """Chat not in last_outbound at all — must not pass."""
+    msg = _msg(text="just noise", chat_type="group", chat_id=-100123)
+    assert _passes_mention_gate(
+        msg, "mybot", 999, [],
+        afterglow_sec=60.0,
+        last_outbound={},
+    ) is False
+
+
+# ---------------------------------------------------------------------------
+# 11. Forwarded-message allowlist
+# ---------------------------------------------------------------------------
+
+def test_forward_from_allowed_id_passes():
+    """Forward from a user in the allowlist passes the gate."""
+    sentinel = types.SimpleNamespace()  # truthy forward_origin
+    msg = _fwd_msg(from_uid=111, forward_origin=sentinel)
+    assert _passes_mention_gate(
+        msg, "mybot", 999, [],
+        forward_allow_ids=[111, 222],
+    ) is True
+
+
+def test_forward_from_non_allowed_id_blocked():
+    """Forward from a user NOT in the allowlist is blocked."""
+    sentinel = types.SimpleNamespace()
+    msg = _fwd_msg(from_uid=999, forward_origin=sentinel)
+    assert _passes_mention_gate(
+        msg, "mybot", 999, [],
+        forward_allow_ids=[111, 222],
+    ) is False
+
+
+def test_non_forward_from_allowed_id_blocked():
+    """Regular (non-forwarded) message from an allowlisted user is NOT exempt."""
+    msg = _fwd_msg(from_uid=111, forward_origin=None)
+    assert _passes_mention_gate(
+        msg, "mybot", 999, [],
+        forward_allow_ids=[111, 222],
+    ) is False
+
+
+def test_forward_empty_allowlist_blocked():
+    """Forward with an empty allowlist must not pass."""
+    sentinel = types.SimpleNamespace()
+    msg = _fwd_msg(from_uid=111, forward_origin=sentinel)
+    assert _passes_mention_gate(
+        msg, "mybot", 999, [],
+        forward_allow_ids=[],
+    ) is False
+
+
+# ---------------------------------------------------------------------------
+# 12. Config parsing for new keys
+# ---------------------------------------------------------------------------
+
+def test_config_parses_afterglow_sec(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("[tg]\ngroup_afterglow_sec = 120\n")
+    from synapse_tg.config import load_config
+    cfg = load_config(p)
+    assert cfg.group_afterglow_sec == 120.0
+
+
+def test_config_afterglow_default_zero():
+    from synapse_tg.config import TgConfig
+    assert TgConfig().group_afterglow_sec == 0.0
+
+
+def test_config_parses_forward_allow_ids(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("[tg]\ngroup_forward_allow_ids = [111, 222]\n")
+    from synapse_tg.config import load_config
+    cfg = load_config(p)
+    assert cfg.group_forward_allow_ids == [111, 222]
+
+
+def test_config_forward_allow_ids_default_empty():
+    from synapse_tg.config import TgConfig
+    assert TgConfig().group_forward_allow_ids == []
