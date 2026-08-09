@@ -143,3 +143,55 @@ def test_no_thinking_deltas_yields_empty_thinking(tmp_path, monkeypatch):
     text, thinking = _stream(loop, bot, provider, monkeypatch)
     assert text == "reply text"
     assert thinking == ""
+
+
+# ── _deliver_reply: thinking suppressed in group chats ───────────────────────
+
+
+class _RecordingBot:
+    """Records every send_message call."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def send_message(self, **kwargs):
+        self.calls.append(kwargs)
+        return type("M", (), {"message_id": 1})()
+
+    async def send_chat_action(self, **_):
+        return None
+
+
+def _deliver(loop, bot, chat_id: int, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "synapse_tg.loop.split_for_tg_typed",
+        lambda text: [{"kind": "text", "text": text}],
+    )
+    monkeypatch.setattr("synapse_tg.loop.gfm_to_tg_html", lambda t: t)
+    asyncio.run(loop._deliver_reply(bot, chat_id, "hello", "some thinking"))
+
+
+def test_thinking_suppressed_in_group_chat(tmp_path, monkeypatch):
+    """Group chat_id (negative) must not receive the thinking bubble."""
+    loop = _loop(tmp_path)
+    loop._state.thinking_on = True
+    bot = _RecordingBot()
+    _deliver(loop, bot, -100123456, monkeypatch)
+    texts = [c.get("text", "") for c in bot.calls]
+    assert not any("\U0001f4ad" in t for t in texts), (
+        "thinking bubble must not be sent to group chats"
+    )
+    # Regular reply still delivered.
+    assert any("hello" in t for t in texts)
+
+
+def test_thinking_sent_in_private_chat(tmp_path, monkeypatch):
+    """Private chat_id (positive) must receive the thinking bubble when thinking_on."""
+    loop = _loop(tmp_path)
+    loop._state.thinking_on = True
+    bot = _RecordingBot()
+    _deliver(loop, bot, 123, monkeypatch)
+    texts = [c.get("text", "") for c in bot.calls]
+    assert any("\U0001f4ad" in t for t in texts), (
+        "thinking bubble must be sent to private chats"
+    )

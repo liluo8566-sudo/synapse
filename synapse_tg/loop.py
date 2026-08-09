@@ -1741,7 +1741,7 @@ class TgLoop:
         response = strip_html_comments(response)
 
         # Thinking bubble: send before the early-return so silent turns still show it.
-        if thinking and self._state.thinking_on:
+        if thinking and self._state.thinking_on and chat_id > 0:
             truncated = thinking[:2000]
             if len(thinking) > 2000:
                 truncated += f"\n... ({len(thinking)} chars total)"
