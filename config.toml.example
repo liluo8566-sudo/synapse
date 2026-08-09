@@ -30,6 +30,14 @@ token = ""
 # forwarder's user id is in this list, it passes the gate.
 # group_forward_allow_ids = [123456789]
 
+# Inbound message prefix templates. Injected before each message so the model
+# can tell messages apart by source.
+# group_meta_template supports {title}, {name}, {uid} placeholders.
+# private_meta_template is a static string (no placeholders).
+# Default: group prefix as shown; private prefix empty (no label).
+# group_meta_template = "[group:{title} from:{name}({uid})] "
+# private_meta_template = "[private:username] "
+
 [outbox]
 # Bridge scan cadence for pending outbox notes (seconds).
 poll_interval_s = 5

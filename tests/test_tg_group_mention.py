@@ -237,20 +237,67 @@ def test_owner_in_group_passes_with_keyword(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 5. _chat_meta includes numeric user id
+# 5. _chat_meta: default templates and config-driven templates
 # ---------------------------------------------------------------------------
 
-def test_chat_meta_private_empty():
+def test_chat_meta_private_empty_default():
     msg = _msg(chat_type="private")
     assert _chat_meta(msg) == ""
 
 
-def test_chat_meta_group_includes_uid():
+def test_chat_meta_group_default_template():
     msg = _msg(chat_type="group", chat_title="MyGroup", from_uid=12345678, chat_id=-100123)
     meta = _chat_meta(msg)
     assert "12345678" in meta
     assert "MyGroup" in meta
-    assert "群:" in meta
+    assert "group:" in meta
+
+
+def test_chat_meta_group_custom_template():
+    msg = _msg(chat_type="group", chat_title="Fun", from_uid=99, chat_id=-1)
+    meta = _chat_meta(msg, group_template="[群:{title} from:{name}({uid})] ")
+    assert meta == "[群:Fun from:Alice(99)] "
+
+
+def test_chat_meta_private_custom_template():
+    msg = _msg(chat_type="private")
+    meta = _chat_meta(msg, private_template="[私聊:霜霜] ")
+    assert meta == "[私聊:霜霜] "
+
+
+def test_chat_meta_private_default_is_empty():
+    msg = _msg(chat_type="private")
+    assert _chat_meta(msg) == ""
+
+
+def test_chat_meta_group_unknown_placeholder_does_not_crash():
+    msg = _msg(chat_type="group", chat_title="X", from_uid=1, chat_id=-1)
+    # Template with unknown key — must not raise, returns the template string
+    result = _chat_meta(msg, group_template="[{unknown_key}:{title}] ")
+    assert result == "[{unknown_key}:{title}] "
+
+
+def test_config_parses_group_meta_template(tmp_path):
+    from synapse_tg.config import load_config
+    p = tmp_path / "config.toml"
+    p.write_text('[tg]\ngroup_meta_template = "[grp:{title}] "\n')
+    cfg = load_config(p)
+    assert cfg.group_meta_template == "[grp:{title}] "
+
+
+def test_config_parses_private_meta_template(tmp_path):
+    from synapse_tg.config import load_config
+    p = tmp_path / "config.toml"
+    p.write_text('[tg]\nprivate_meta_template = "[pm:user] "\n')
+    cfg = load_config(p)
+    assert cfg.private_meta_template == "[pm:user] "
+
+
+def test_config_meta_template_defaults():
+    from synapse_tg.config import TgConfig
+    cfg = TgConfig()
+    assert cfg.group_meta_template == "[group:{title} from:{name}({uid})] "
+    assert cfg.private_meta_template == ""
 
 
 # ---------------------------------------------------------------------------

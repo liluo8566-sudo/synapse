@@ -91,6 +91,13 @@ class TgConfig:
     # user id is in this list, it passes the gate regardless of keywords.
     group_forward_allow_ids: list = field(default_factory=list)
 
+    # Inbound message prefix templates. Supports str.format placeholders.
+    # group_meta_template: {title}, {name}, {uid} available.
+    # private_meta_template: no placeholders (static string).
+    # Empty string = no prefix (default for private).
+    group_meta_template: str = "[group:{title} from:{name}({uid})] "
+    private_meta_template: str = ""
+
     # Watch + kick (P6). kick_cmd = cortex.kick launcher (venv python + module),
     # e.g. ["/path/.venv/bin/python", "-m", "cortex.kick"]. Empty = watch/kick off.
     outbox_kick_cmd: list = field(default_factory=list)
@@ -265,6 +272,12 @@ def load_config(path: Path | None = None) -> TgConfig:
             cfg.group_forward_allow_ids = [
                 x for x in gfa if isinstance(x, int) and not isinstance(x, bool)
             ]
+        gmt = tg.get("group_meta_template")
+        if isinstance(gmt, str):
+            cfg.group_meta_template = gmt
+        pmt = tg.get("private_meta_template")
+        if isinstance(pmt, str):
+            cfg.private_meta_template = pmt
 
     outbox = data.get("outbox") or {}
     if isinstance(outbox, dict):

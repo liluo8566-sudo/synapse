@@ -97,17 +97,25 @@ class _NullTyping:
 from synapse_core.text_filters import strip_html_comments  # noqa: E402
 
 
-def _chat_meta(msg) -> str:
-    """Return a metadata prefix for group messages so Claude can tell who sent what.
-    Private messages return empty string (no prefix needed)."""
+def _chat_meta(msg, group_template: str = "[group:{title} from:{name}({uid})] ", private_template: str = "") -> str:
+    """Return a metadata prefix driven by config templates.
+    Group: renders group_template with {title}/{name}/{uid}.
+    Private: returns private_template as-is (no placeholders).
+    A template with unknown placeholders falls back to the raw string."""
     chat = msg.chat
     if chat.type in ("group", "supergroup"):
         user = msg.from_user
         name = user.first_name if user else "?"
         uid = user.id if user else "?"
         title = chat.title or str(chat.id)
-        return f"[群:{title} from:{name}({uid})] "
-    return ""
+        try:
+            return group_template.format(title=title, name=name, uid=uid)
+        except (KeyError, ValueError):
+            return group_template
+    try:
+        return private_template.format()
+    except (KeyError, ValueError):
+        return private_template
 
 
 def _passes_mention_gate(
@@ -1358,7 +1366,7 @@ class TgLoop:
         if reply and reply.text:
             quoted = reply.text[:80]
             quote_prefix = f'[quoting: "{quoted}"]\n'
-        meta = _chat_meta(msg)
+        meta = _chat_meta(msg, self._cfg.group_meta_template, self._cfg.private_meta_template)
         full = f"{meta}{quote_prefix}{text}" if meta else f"{quote_prefix}{text}"
         # Route to per-origin buffer so private and group content never merge
         # in the same debounce window (bug 2); routing travels with the message
@@ -1393,7 +1401,7 @@ class TgLoop:
         if paths:
             instruction = build_read_instruction(paths)
             caption = (msg.caption or "").strip()
-            cmeta = _chat_meta(msg)
+            cmeta = _chat_meta(msg, self._cfg.group_meta_template, self._cfg.private_meta_template)
             body = f"{caption}\n{instruction}" if caption else instruction
             self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered photo: %s", paths)
@@ -1412,7 +1420,7 @@ class TgLoop:
         if path:
             instruction = build_read_instruction([path])
             caption = (msg.caption or "").strip()
-            cmeta = _chat_meta(msg)
+            cmeta = _chat_meta(msg, self._cfg.group_meta_template, self._cfg.private_meta_template)
             body = f"{caption}\n{instruction}" if caption else instruction
             self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered animation: %s", path)
@@ -1431,7 +1439,7 @@ class TgLoop:
         if path:
             instruction = build_read_instruction([path])
             caption = (msg.caption or "").strip()
-            cmeta = _chat_meta(msg)
+            cmeta = _chat_meta(msg, self._cfg.group_meta_template, self._cfg.private_meta_template)
             body = f"{caption}\n{instruction}" if caption else instruction
             self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered document: %s", path)
@@ -1448,7 +1456,7 @@ class TgLoop:
         path = await materialize_sticker(context.bot, msg, self._cfg.data_dir)
         if path:
             stk = msg.sticker
-            cmeta = _chat_meta(msg)
+            cmeta = _chat_meta(msg, self._cfg.group_meta_template, self._cfg.private_meta_template)
             stk_meta = f"[sticker: emoji={stk.emoji or '?'}, set={stk.set_name or 'none'}]"
             instruction = build_read_instruction([path])
             self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{stk_meta}\n{instruction}" if cmeta else f"{stk_meta}\n{instruction}")
@@ -1468,7 +1476,7 @@ class TgLoop:
         if path:
             instruction = build_read_instruction([path])
             caption = (msg.caption or "").strip()
-            cmeta = _chat_meta(msg)
+            cmeta = _chat_meta(msg, self._cfg.group_meta_template, self._cfg.private_meta_template)
             body = f"{caption}\n{instruction}" if caption else instruction
             self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered video: %s", path)
