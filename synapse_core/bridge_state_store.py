@@ -36,6 +36,7 @@ PERSISTED_KEYS: tuple[str, ...] = (
     "session_id",
     "chat_id",
     "last_from_wxid",
+    "inflight",
 )
 
 
@@ -89,6 +90,10 @@ def load(path: Path) -> dict:
             if isinstance(raw_map, dict)
             else {}
         )
+    # inflight must be a dict or None; drop anything else silently.
+    raw_inflight = out.get("inflight")
+    if raw_inflight is not None and not isinstance(raw_inflight, dict):
+        out["inflight"] = None
     return out
 
 
