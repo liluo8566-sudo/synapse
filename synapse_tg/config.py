@@ -176,6 +176,17 @@ class TgConfig:
     bark_icon: str = ""
     bark_max_chars: int = 150
 
+    # TTS ([tts] section). Effective only when enabled AND api_key AND voice_id are set.
+    tts_enabled: bool = False
+    tts_api_key: str = ""
+    tts_voice_id: str = ""
+    tts_model_id: str = "eleven_multilingual_v2"
+    tts_output_format: str = "mp3_44100_128"
+
+    def tts_effective_enabled(self) -> bool:
+        """TTS is active only when enabled AND api_key AND voice_id are all set."""
+        return bool(self.tts_enabled and self.tts_api_key and self.tts_voice_id)
+
     def shell_socket_path(self) -> Path:
         return Path(self.shell_socket).expanduser()
 
@@ -466,5 +477,20 @@ def load_config(path: Path | None = None) -> TgConfig:
         mc = bark.get("max_chars")
         if isinstance(mc, int) and not isinstance(mc, bool) and mc > 0:
             cfg.bark_max_chars = mc
+
+    tts = data.get("tts") or {}
+    if isinstance(tts, dict):
+        en = tts.get("enabled")
+        if isinstance(en, bool):
+            cfg.tts_enabled = en
+        for toml_key, attr in (
+            ("api_key", "tts_api_key"),
+            ("voice_id", "tts_voice_id"),
+            ("model_id", "tts_model_id"),
+            ("output_format", "tts_output_format"),
+        ):
+            val = tts.get(toml_key)
+            if isinstance(val, str):
+                setattr(cfg, attr, val)
 
     return cfg

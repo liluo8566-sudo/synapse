@@ -84,6 +84,8 @@ async def send_media(
                 await bot.send_document(**kwargs, document=fh)
             elif kind == "sticker":
                 await bot.send_sticker(**kwargs, sticker=fh)
+            elif kind == "voice":
+                await bot.send_voice(**kwargs, voice=fh)
             else:
                 logger.error("send_media: unknown kind %r for path %s", kind, path)
                 return False

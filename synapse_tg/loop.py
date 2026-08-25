@@ -50,6 +50,7 @@ from . import bark as _bark
 from . import outbox
 from .shell import _tzinfo
 from .split import split_for_tg, split_for_tg_typed
+from . import tts as _tts
 from .typing_action import TypingAction
 
 if TYPE_CHECKING:
@@ -1807,6 +1808,34 @@ class TgLoop:
                         except Exception as ae:
                             logger.warning("alerts.write failed: %s", ae)
                     break
+            elif bubble["kind"] == "voice":
+                voice_text = bubble["text"]
+                audio_path: str | None = None
+                if self._cfg.tts_effective_enabled():
+                    audio_path = await _tts.synthesize(voice_text, self._cfg)
+                if audio_path is not None:
+                    try:
+                        await send_media(
+                            bot, chat_id, "voice", audio_path,
+                            reply_to=reply_to_id,
+                            send_retry_max=self._cfg.send_retry_max,
+                            retry_after_cap_sec=self._cfg.retry_after_cap_sec,
+                        )
+                    finally:
+                        try:
+                            import os as _os
+                            _os.unlink(audio_path)
+                        except OSError:
+                            pass
+                else:
+                    send_kwargs = dict(chat_id=chat_id, text=voice_text)
+                    fallback_kwargs = dict(chat_id=chat_id, text=voice_text)
+                    if reply_to_id is not None:
+                        send_kwargs["reply_to_message_id"] = reply_to_id
+                        fallback_kwargs["reply_to_message_id"] = reply_to_id
+                    await self._send_text_bubble(bot, send_kwargs, fallback_kwargs)
+                if reply_to_id is not None:
+                    reply_to_id = None
             else:
                 ok = await send_media(
                     bot, chat_id, bubble["kind"], bubble["path"],

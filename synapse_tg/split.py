@@ -9,6 +9,11 @@ _MEDIA_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 
+_VOICE_TAG_RE = re.compile(
+    r"<voice>(.*?)</voice>",
+    re.IGNORECASE | re.DOTALL,
+)
+
 # Sentence-end punctuation (CJK always; ASCII .!? gated on next char).
 _SENTENCE_END = "。！？.!?"
 _OPEN_BRACKETS = "「『（(【〔[《〈"
@@ -151,30 +156,46 @@ def split_for_tg(text: str, limit: int = DEFAULT_LIMIT) -> list[str]:
 def split_for_tg_typed(
     text: str, limit: int = DEFAULT_LIMIT
 ) -> list[dict[str, str]]:
-    """Split text with embedded media tags into typed bubbles.
+    """Split text with embedded media/voice tags into typed bubbles.
 
-    Returns list of {"kind": "text"/"image"/"gif"/"video"/"file", "text"/"path": ...}.
+    Returns list of:
+      {"kind": "text", "text": ...}
+      {"kind": "image"/"gif"/"video"/"file", "path": ...}
+      {"kind": "voice", "text": ...}
     """
     if not text:
         return []
 
+    # Collect all tag matches sorted by position.
+    # Voice tags with empty inner text are recorded with bubble=None so the span
+    # is still consumed (last_end advances past the tag) but no bubble is emitted.
+    matches: list[tuple[int, int, dict | None]] = []
+    for m in _MEDIA_TAG_RE.finditer(text):
+        matches.append((m.start(), m.end(), {"kind": m.group(1).lower(), "path": m.group(2)}))
+    for m in _VOICE_TAG_RE.finditer(text):
+        inner = m.group(1).strip()
+        bubble = {"kind": "voice", "text": inner} if inner else None
+        matches.append((m.start(), m.end(), bubble))
+    matches.sort(key=lambda t: t[0])
+
     bubbles: list[dict[str, str]] = []
     last_end = 0
 
-    for m in _MEDIA_TAG_RE.finditer(text):
-        before = text[last_end : m.start()].strip()
+    for start, end, bubble in matches:
+        before = text[last_end:start].strip()
         if before:
             for chunk in split_for_tg(before, limit):
                 bubbles.append({"kind": "text", "text": chunk})
-        bubbles.append({"kind": m.group(1).lower(), "path": m.group(2)})
-        last_end = m.end()
+        if bubble is not None:
+            bubbles.append(bubble)
+        last_end = end
 
     tail = text[last_end:].strip()
     if tail:
         for chunk in split_for_tg(tail, limit):
             bubbles.append({"kind": "text", "text": chunk})
 
-    if not bubbles:
+    if not bubbles and not matches:
         return [{"kind": "text", "text": c} for c in split_for_tg(text, limit)]
 
     return bubbles
