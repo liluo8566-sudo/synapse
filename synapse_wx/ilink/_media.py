@@ -9,6 +9,7 @@ import base64
 import hashlib
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlencode
@@ -32,6 +33,15 @@ _CDN_MAX_CIPHERTEXT = 550_000
 # re-ticket + retry the two-step upload. 3 attempts → ~96% per-send success.
 _CDN_UPLOAD_ATTEMPTS = 3
 _CDN_RETRY_BACKOFF_S = 0.8
+
+# Hard wall-clock budget for the entire upload attempt loop (all retries).
+# CDN hangs indefinitely on wedged connections; httpx per-call timeouts don't
+# fire reliably when bytes trickle in. The worker runs in a daemon thread so
+# a timeout never blocks the caller or interpreter exit.
+_UPLOAD_WALL_TIMEOUT_S = 75.0
+
+# Dedicated per-upload httpx timeout; isolates CDN from the shared client pool.
+_UPLOAD_HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=30.0, pool=10.0)
 
 # media_type codes for getuploadurl (different from item_list type codes).
 _MEDIA_TYPE_IMAGE = 1
@@ -172,6 +182,132 @@ def _item_type_to_media_type(item_type: str) -> int:
     return _MEDIA_TYPE_FILE
 
 
+def _upload_attempt_loop(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    ciphertext: bytes,
+    key_hex: str,
+    aes_key_b64: str,
+    md5_hex: str,
+    rawsize: int,
+    padded_size: int,
+    media_type: int,
+    to_user_id: str,
+    _http: httpx.Client | None = None,
+) -> dict:
+    """Inner upload loop run inside a bounded worker thread.
+
+    Uses a dedicated short-lived httpx.Client so CDN wedged connections can't
+    pollute the shared client pool. Caller enforces the wall-clock deadline via
+    future.result(timeout=...).
+
+    _http: injectable client for tests; when None a fresh client is created.
+    """
+    encrypt_query_param = ""
+
+    def _run(client: httpx.Client) -> None:
+        nonlocal encrypt_query_param
+        for attempt in range(_CDN_UPLOAD_ATTEMPTS):
+            if attempt:
+                time.sleep(_CDN_RETRY_BACKOFF_S * attempt)
+            filekey = _random_filekey()
+
+            # Step A — get upload ticket (fresh per attempt)
+            ticket_body = {
+                "filekey": filekey,
+                "media_type": media_type,
+                "to_user_id": to_user_id,
+                "rawsize": rawsize,
+                "rawfilemd5": md5_hex,
+                "filesize": padded_size,
+                "no_need_thumb": True,
+                "aeskey": key_hex,
+                "base_info": {"channel_version": _get_channel_version()},
+            }
+            try:
+                ticket_resp = client.post(
+                    f"{base_url}/ilink/bot/getuploadurl",
+                    headers=headers,
+                    json=ticket_body,
+                )
+            except Exception as e:
+                logger.warning("upload_and_encrypt: getuploadurl POST failed: %s", e)
+                continue
+            if ticket_resp.status_code != 200:
+                logger.warning(
+                    "upload_and_encrypt: getuploadurl HTTP %s — %s",
+                    ticket_resp.status_code,
+                    ticket_resp.text[:200],
+                )
+                continue
+            try:
+                ticket_data = ticket_resp.json()
+            except Exception:
+                logger.warning("upload_and_encrypt: getuploadurl non-JSON response")
+                continue
+            if ticket_data.get("ret") not in (0, None):
+                logger.warning("upload_and_encrypt: getuploadurl ret=%s", ticket_data.get("ret"))
+                continue
+            upload_param = ticket_data.get("upload_param", "")
+            if not upload_param:
+                logger.warning("upload_and_encrypt: getuploadurl missing upload_param")
+                continue
+
+            # Step B — CDN direct upload
+            cdn_url = CDN_UPLOAD + "?" + urlencode(
+                {"encrypted_query_param": upload_param, "filekey": filekey}
+            )
+            try:
+                cdn_resp = client.post(
+                    cdn_url,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "User-Agent": _CDN_UA,
+                    },
+                    content=ciphertext,
+                )
+            except Exception as e:
+                logger.warning("upload_and_encrypt: CDN upload POST failed: %s", e)
+                continue
+            if cdn_resp.status_code != 200:
+                err = cdn_resp.headers.get("x-error-message", "") or cdn_resp.headers.get("x-error-code", "")
+                logger.warning(
+                    "upload_and_encrypt: CDN upload HTTP %s — %s (attempt %d/%d)",
+                    cdn_resp.status_code,
+                    err or cdn_resp.text[:200],
+                    attempt + 1,
+                    _CDN_UPLOAD_ATTEMPTS,
+                )
+                continue
+            encrypt_query_param = cdn_resp.headers.get("x-encrypted-param", "")
+            if not encrypt_query_param:
+                logger.warning("upload_and_encrypt: CDN response missing x-encrypted-param header")
+                continue
+            break
+
+    if _http is not None:
+        _run(_http)
+    else:
+        with httpx.Client(timeout=_UPLOAD_HTTP_TIMEOUT) as fresh:
+            _run(fresh)
+
+    if not encrypt_query_param:
+        logger.warning(
+            "upload_and_encrypt: all %d upload attempts failed", _CDN_UPLOAD_ATTEMPTS
+        )
+        return {}
+
+    return {
+        "encrypt_query_param": encrypt_query_param,
+        "aes_key_hex": key_hex,
+        "aes_key_b64": aes_key_b64,
+        "padded_size": padded_size,
+        "rawsize": rawsize,
+        "md5": md5_hex,
+    }
+
+
 def upload_and_encrypt(
     http: httpx.Client,
     *,
@@ -180,14 +316,24 @@ def upload_and_encrypt(
     path: Path,
     item_type: str,
     to_user_id: str,
+    _wall_timeout: float = _UPLOAD_WALL_TIMEOUT_S,
 ) -> dict:
     """Read → AES-128-ECB encrypt → two-step CDN upload → return media metadata.
 
     Step A: POST {base_url}/ilink/bot/getuploadurl — returns upload_param ticket.
     Step B: POST CDN_UPLOAD?encrypted_query_param=...&filekey=... — octet-stream.
 
+    The entire attempt loop runs inside a bounded worker thread with a hard
+    wall-clock deadline (_wall_timeout). On timeout, logs a warning and returns
+    {} so callers can move on to the next send. The leaked worker thread is
+    daemon=True and will be reaped when the process exits.
+
     Returns {encrypt_query_param, aes_key_hex, aes_key_b64, padded_size, rawsize, md5}
     on success, or {} on any failure.
+
+    The `http` parameter is retained for API compatibility (headers/base_url are
+    extracted from it by the caller); actual CDN requests use a fresh client to
+    avoid polluting the shared connection pool.
     """
     p = Path(path)
     if not p.exists() or not p.is_file():
@@ -227,102 +373,42 @@ def upload_and_encrypt(
     padded_size = len(ciphertext)
     media_type = _item_type_to_media_type(item_type)
 
-    # Two-step upload with re-ticket + retry (CDN is ~1/3 flaky).
-    encrypt_query_param = ""
-    for attempt in range(_CDN_UPLOAD_ATTEMPTS):
-        if attempt:
-            time.sleep(_CDN_RETRY_BACKOFF_S * attempt)
-        filekey = _random_filekey()
+    # Two-step upload guarded by a hard wall-clock deadline.
+    # _http=None → _upload_attempt_loop opens a fresh dedicated client, keeping
+    # the shared `http` pool untouched. See _upload_attempt_loop docstring.
+    # A daemon thread is used so a hung worker never blocks the caller or
+    # interpreter exit (ThreadPoolExecutor.shutdown(wait=True) would join and block).
+    _result: list[dict] = []
 
-        # Step A — get upload ticket (fresh per attempt)
-        ticket_body = {
-            "filekey": filekey,
-            "media_type": media_type,
-            "to_user_id": to_user_id,
-            "rawsize": rawsize,
-            "rawfilemd5": md5_hex,
-            "filesize": padded_size,
-            "no_need_thumb": True,
-            "aeskey": key_hex,
-            "base_info": {"channel_version": _get_channel_version()},
-        }
+    def _worker() -> None:
         try:
-            ticket_resp = http.post(
-                f"{base_url}/ilink/bot/getuploadurl",
-                headers=headers,
-                json=ticket_body,
-                timeout=30,
+            _result.append(
+                _upload_attempt_loop(
+                    base_url=base_url,
+                    headers=headers,
+                    ciphertext=ciphertext,
+                    key_hex=key_hex,
+                    aes_key_b64=aes_key_b64,
+                    md5_hex=md5_hex,
+                    rawsize=rawsize,
+                    padded_size=padded_size,
+                    media_type=media_type,
+                    to_user_id=to_user_id,
+                )
             )
-        except Exception as e:
-            logger.warning("upload_and_encrypt: getuploadurl POST failed: %s", e)
-            continue
-        if ticket_resp.status_code != 200:
-            logger.warning(
-                "upload_and_encrypt: getuploadurl HTTP %s — %s",
-                ticket_resp.status_code,
-                ticket_resp.text[:200],
-            )
-            continue
-        try:
-            ticket_data = ticket_resp.json()
         except Exception:
-            logger.warning("upload_and_encrypt: getuploadurl non-JSON response")
-            continue
-        if ticket_data.get("ret") not in (0, None):
-            logger.warning("upload_and_encrypt: getuploadurl ret=%s", ticket_data.get("ret"))
-            continue
-        upload_param = ticket_data.get("upload_param", "")
-        if not upload_param:
-            logger.warning("upload_and_encrypt: getuploadurl missing upload_param")
-            continue
+            logger.exception("upload_and_encrypt: worker raised an exception")
 
-        # Step B — CDN direct upload
-        cdn_url = CDN_UPLOAD + "?" + urlencode(
-            {"encrypted_query_param": upload_param, "filekey": filekey}
-        )
-        try:
-            cdn_resp = http.post(
-                cdn_url,
-                headers={
-                    "Content-Type": "application/octet-stream",
-                    "User-Agent": _CDN_UA,
-                },
-                content=ciphertext,
-                timeout=60,
-            )
-        except Exception as e:
-            logger.warning("upload_and_encrypt: CDN upload POST failed: %s", e)
-            continue
-        if cdn_resp.status_code != 200:
-            err = cdn_resp.headers.get("x-error-message", "") or cdn_resp.headers.get("x-error-code", "")
-            logger.warning(
-                "upload_and_encrypt: CDN upload HTTP %s — %s (attempt %d/%d)",
-                cdn_resp.status_code,
-                err or cdn_resp.text[:200],
-                attempt + 1,
-                _CDN_UPLOAD_ATTEMPTS,
-            )
-            continue
-        encrypt_query_param = cdn_resp.headers.get("x-encrypted-param", "")
-        if not encrypt_query_param:
-            logger.warning("upload_and_encrypt: CDN response missing x-encrypted-param header")
-            continue
-        break
-
-    if not encrypt_query_param:
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(_wall_timeout)
+    if t.is_alive():
         logger.warning(
-            "upload_and_encrypt: all %d upload attempts failed", _CDN_UPLOAD_ATTEMPTS
+            "upload_and_encrypt: wall-clock deadline exceeded (%.0fs) — dropping media",
+            _wall_timeout,
         )
         return {}
-
-    return {
-        "encrypt_query_param": encrypt_query_param,
-        "aes_key_hex": key_hex,
-        "aes_key_b64": aes_key_b64,
-        "padded_size": padded_size,
-        "rawsize": rawsize,
-        "md5": md5_hex,
-    }
+    return _result[0] if _result else {}
 
 
 def _get_channel_version() -> str:

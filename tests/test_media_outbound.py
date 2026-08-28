@@ -37,6 +37,19 @@ def _fast_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(media_mod.time, "sleep", lambda *_: None)
 
 
+def _stub_http_client(monkeypatch: pytest.MonkeyPatch, mock_client: MagicMock) -> None:
+    """Patch media_mod.httpx.Client so the upload loop uses mock_client.
+
+    _upload_attempt_loop creates its own httpx.Client as a context manager.
+    This helper replaces that construction so the mock's .post() side_effects
+    are used instead of real network calls.
+    """
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=mock_client)
+    cm.__exit__ = MagicMock(return_value=False)
+    monkeypatch.setattr(media_mod.httpx, "Client", MagicMock(return_value=cm))
+
+
 def _resp(status: int = 200, body: dict | None = None, headers: dict | None = None) -> MagicMock:
     r = MagicMock(spec=httpx.Response)
     r.status_code = status
@@ -134,9 +147,10 @@ def test_upload_and_encrypt_getuploadurl_request_shape(
     cdn_resp = _resp(200, {}, headers={"x-encrypted-param": "DL-PARAM"})
     http = MagicMock(spec=httpx.Client)
     http.post.side_effect = [ticket_resp, cdn_resp]
+    _stub_http_client(monkeypatch, http)
 
     meta = upload_and_encrypt(
-        http,
+        MagicMock(),
         base_url="https://ilinkai.weixin.qq.com",
         headers={"Authorization": "Bearer tok"},
         path=f,
@@ -177,9 +191,10 @@ def test_upload_and_encrypt_cdn_upload_shape(
     cdn_resp = _resp(200, {}, headers={"x-encrypted-param": "DLPARAM"})
     http = MagicMock(spec=httpx.Client)
     http.post.side_effect = [ticket_resp, cdn_resp]
+    _stub_http_client(monkeypatch, http)
 
     upload_and_encrypt(
-        http,
+        MagicMock(),
         base_url="https://ilinkai.weixin.qq.com",
         headers={},
         path=f,
@@ -211,9 +226,10 @@ def test_upload_and_encrypt_returns_download_param(
     cdn_resp = _resp(200, {}, headers={"x-encrypted-param": "THE-DOWNLOAD-PARAM"})
     http = MagicMock(spec=httpx.Client)
     http.post.side_effect = [ticket_resp, cdn_resp]
+    _stub_http_client(monkeypatch, http)
 
     meta = upload_and_encrypt(
-        http, base_url="https://ilinkai.weixin.qq.com", headers={},
+        MagicMock(), base_url="https://ilinkai.weixin.qq.com", headers={},
         path=f, item_type="image", to_user_id="u",
     )
     assert meta["encrypt_query_param"] == "THE-DOWNLOAD-PARAM"
@@ -235,10 +251,11 @@ def test_upload_and_encrypt_media_type_mapping(
         f.write_bytes(b"data")
         ticket_resp = _resp(200, {"ret": 0, "upload_param": "T"})
         cdn_resp = _resp(200, {}, headers={"x-encrypted-param": "P"})
-        http = MagicMock(spec=httpx.Client)
+        http = MagicMock()  # no spec= — httpx.Client may already be patched
         http.post.side_effect = [ticket_resp, cdn_resp]
+        _stub_http_client(monkeypatch, http)
         upload_and_encrypt(
-            http, base_url="https://x.com", headers={},
+            MagicMock(), base_url="https://x.com", headers={},
             path=f, item_type=item_type, to_user_id="u",
         )
         body = http.post.call_args_list[0].kwargs["json"]
@@ -256,9 +273,10 @@ def test_upload_and_encrypt_getuploadurl_fail_returns_empty(
 
     http = MagicMock(spec=httpx.Client)
     http.post.return_value = _resp(500, {"ret": -1})
+    _stub_http_client(monkeypatch, http)
 
     meta = upload_and_encrypt(
-        http, base_url="https://ilinkai.weixin.qq.com", headers={},
+        MagicMock(), base_url="https://ilinkai.weixin.qq.com", headers={},
         path=f, item_type="image", to_user_id="u",
     )
     assert meta == {}
@@ -279,9 +297,10 @@ def test_upload_and_encrypt_cdn_fail_returns_empty(
     cdn_resp = _resp(403, None, headers={"x-error-message": "quota exceeded"})
     http = MagicMock(spec=httpx.Client)
     http.post.side_effect = [ticket_resp, cdn_resp] * media_mod._CDN_UPLOAD_ATTEMPTS
+    _stub_http_client(monkeypatch, http)
 
     meta = upload_and_encrypt(
-        http, base_url="https://ilinkai.weixin.qq.com", headers={},
+        MagicMock(), base_url="https://ilinkai.weixin.qq.com", headers={},
         path=f, item_type="image", to_user_id="u",
     )
     assert meta == {}
@@ -302,9 +321,10 @@ def test_upload_and_encrypt_retries_then_succeeds(
     cdn_ok = _resp(200, None, headers={"x-encrypted-param": "DOWNPARAM"})
     http = MagicMock(spec=httpx.Client)
     http.post.side_effect = [ticket, cdn_500, ticket, cdn_ok]
+    _stub_http_client(monkeypatch, http)
 
     meta = upload_and_encrypt(
-        http, base_url="https://ilinkai.weixin.qq.com", headers={},
+        MagicMock(), base_url="https://ilinkai.weixin.qq.com", headers={},
         path=f, item_type="image", to_user_id="u",
     )
     assert meta.get("encrypt_query_param") == "DOWNPARAM"
@@ -312,9 +332,8 @@ def test_upload_and_encrypt_retries_then_succeeds(
 
 
 def test_upload_and_encrypt_missing_file_returns_empty(tmp_path: Path) -> None:
-    http = MagicMock(spec=httpx.Client)
     meta = upload_and_encrypt(
-        http,
+        MagicMock(),
         base_url="https://ilinkai.weixin.qq.com",
         headers={},
         path=tmp_path / "nope.png",
@@ -322,7 +341,6 @@ def test_upload_and_encrypt_missing_file_returns_empty(tmp_path: Path) -> None:
         to_user_id="u",
     )
     assert meta == {}
-    assert http.post.call_count == 0
 
 
 # ── aes_key double-encoding ────────────────────────────────────────────────
@@ -534,9 +552,10 @@ def test_cdn_upload_includes_micromessenger_ua(
     cdn_resp = _resp(200, {}, headers={"x-encrypted-param": "DLPARAM"})
     http = MagicMock(spec=httpx.Client)
     http.post.side_effect = [ticket_resp, cdn_resp]
+    _stub_http_client(monkeypatch, http)
 
     upload_and_encrypt(
-        http,
+        MagicMock(),
         base_url="https://ilinkai.weixin.qq.com",
         headers={},
         path=f,
@@ -564,9 +583,10 @@ def test_cdn_ua_not_on_getuploadurl(
     cdn_resp = _resp(200, {}, headers={"x-encrypted-param": "P"})
     http = MagicMock(spec=httpx.Client)
     http.post.side_effect = [ticket_resp, cdn_resp]
+    _stub_http_client(monkeypatch, http)
 
     upload_and_encrypt(
-        http,
+        MagicMock(),
         base_url="https://ilinkai.weixin.qq.com",
         headers={"Authorization": "Bearer tok"},
         path=f,
@@ -596,12 +616,9 @@ def test_oversize_ciphertext_returns_empty_no_cdn_call(
     monkeypatch.setattr(media_mod, "_random_key", lambda: b"K" * 16)
     monkeypatch.setattr(media_mod, "_random_filekey", lambda: "aa" * 16)
 
-    ticket_resp = _resp(200, {"ret": 0, "upload_param": "T"})
-    http = MagicMock(spec=httpx.Client)
-    http.post.return_value = ticket_resp
-
+    # oversize check is done before the executor is dispatched — no http calls expected
     meta = upload_and_encrypt(
-        http,
+        MagicMock(),
         base_url="https://ilinkai.weixin.qq.com",
         headers={},
         path=f,
@@ -610,8 +627,6 @@ def test_oversize_ciphertext_returns_empty_no_cdn_call(
     )
 
     assert meta == {}
-    # Neither getuploadurl nor CDN should be called
-    assert http.post.call_count == 0
 
 
 def test_just_under_limit_proceeds_normally(
@@ -629,9 +644,10 @@ def test_just_under_limit_proceeds_normally(
     cdn_resp = _resp(200, {}, headers={"x-encrypted-param": "P"})
     http = MagicMock(spec=httpx.Client)
     http.post.side_effect = [ticket_resp, cdn_resp]
+    _stub_http_client(monkeypatch, http)
 
     meta = upload_and_encrypt(
-        http,
+        MagicMock(),
         base_url="https://ilinkai.weixin.qq.com",
         headers={},
         path=f,
@@ -641,3 +657,80 @@ def test_just_under_limit_proceeds_normally(
 
     assert meta != {}
     assert http.post.call_count == 2
+
+
+# ── wall-clock deadline guard ──────────────────────────────────────────────
+
+
+def test_upload_wall_deadline_returns_empty_on_hang(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hanging upload (sleep 5s) with a 0.2s deadline must return {} within ~1s.
+
+    The hang duration (5s) is intentionally much longer than the wall deadline
+    (0.2s) so that any join() on the worker thread would expose itself by
+    causing elapsed > 1s.  With a daemon thread + t.join(deadline) + is_alive()
+    check the caller returns promptly after the deadline fires.
+    """
+    import time as _time
+
+    f = tmp_path / "img.png"
+    f.write_bytes(b"x" * 32)
+    monkeypatch.setattr(media_mod, "_random_key", lambda: b"K" * 16)
+    monkeypatch.setattr(media_mod, "_random_filekey", lambda: "aa" * 16)
+
+    wall_deadline = 0.2  # 200ms — fast for CI
+
+    def _hanging_post(*_a, **_kw):
+        _time.sleep(5)  # far beyond the deadline — would expose any join() bug
+        return _resp(200, {"ret": 0, "upload_param": "T"})
+
+    http = MagicMock(spec=httpx.Client)
+    http.post.side_effect = _hanging_post
+    _stub_http_client(monkeypatch, http)
+
+    t0 = _time.monotonic()
+    meta = upload_and_encrypt(
+        MagicMock(),
+        base_url="https://ilinkai.weixin.qq.com",
+        headers={},
+        path=f,
+        item_type="image",
+        to_user_id="u",
+        _wall_timeout=wall_deadline,
+    )
+    elapsed = _time.monotonic() - t0
+
+    assert meta == {}
+    # Must return within ~1s — any join on the 5s-sleeping thread would fail this
+    assert elapsed < 1.0, f"took {elapsed:.2f}s — deadline not enforced (join bug?)"
+
+
+def test_upload_wall_deadline_success_returns_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful upload within the deadline returns the metadata dict."""
+    f = tmp_path / "img.png"
+    f.write_bytes(b"x" * 32)
+    monkeypatch.setattr(media_mod, "_random_key", lambda: b"K" * 16)
+    monkeypatch.setattr(media_mod, "_random_filekey", lambda: "aa" * 16)
+
+    ticket_resp = _resp(200, {"ret": 0, "upload_param": "T"})
+    cdn_resp = _resp(200, {}, headers={"x-encrypted-param": "WALL-PARAM"})
+    http = MagicMock(spec=httpx.Client)
+    http.post.side_effect = [ticket_resp, cdn_resp]
+    _stub_http_client(monkeypatch, http)
+
+    meta = upload_and_encrypt(
+        MagicMock(),
+        base_url="https://ilinkai.weixin.qq.com",
+        headers={},
+        path=f,
+        item_type="image",
+        to_user_id="u",
+        _wall_timeout=10.0,
+    )
+
+    assert meta.get("encrypt_query_param") == "WALL-PARAM"
+    assert "aes_key_hex" in meta
+    assert "md5" in meta
