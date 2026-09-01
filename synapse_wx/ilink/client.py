@@ -235,6 +235,10 @@ class ILinkClient:
             )
             return False, None, "non-JSON response"
         ret = resp_data.get("ret")
+        # TEMP DIAG (shadow-drop hunt): log full server response for every send.
+        logger.info(
+            "SEND_DIAG: status=%d body=%s", resp.status_code, str(resp_data)[:400]
+        )
         if resp.status_code == 200 and (ret is None or ret == 0):
             return True, ret, ""
         return False, ret, str(resp_data.get("errmsg", resp.text[:200]))
