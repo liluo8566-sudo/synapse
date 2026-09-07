@@ -75,6 +75,86 @@ def test_spawn_appends_quote_and_media_system_prompts():
         assert "never fabricate" in appended
 
 
+def test_spawn_system_prompt_files_replace_default(tmp_path):
+    f1 = tmp_path / "a.md"
+    f2 = tmp_path / "b.md"
+    f1.write_text("body one", encoding="utf-8")
+    f2.write_text("body two", encoding="utf-8")
+    with patch("synapse_core.providers.cc.subprocess.Popen") as Popen:
+        Popen.return_value = _make_fake_popen([])
+        p = _provider(
+            system_prompts=[QUOTE_SYSTEM_PROMPT],
+            system_prompt_files=[str(f1), str(f2)],
+        )
+        p.spawn()
+        cmd = Popen.call_args[0][0]
+        assert "--append-system-prompt" not in cmd
+        assert cmd.count("--system-prompt") == 1
+        text = cmd[cmd.index("--system-prompt") + 1]
+        assert text == "body one" + "\n\n" + "body two" + "\n\n" + QUOTE_SYSTEM_PROMPT
+
+
+def test_spawn_system_prompt_files_skips_missing(tmp_path, caplog):
+    present = tmp_path / "present.md"
+    present.write_text("only this survives", encoding="utf-8")
+    missing = tmp_path / "missing.md"
+    with patch("synapse_core.providers.cc.subprocess.Popen") as Popen:
+        Popen.return_value = _make_fake_popen([])
+        p = _provider(
+            system_prompts=[],
+            system_prompt_files=[str(missing), str(present)],
+        )
+        with caplog.at_level("WARNING"):
+            p.spawn()
+        cmd = Popen.call_args[0][0]
+        assert "--append-system-prompt" not in cmd
+        text = cmd[cmd.index("--system-prompt") + 1]
+        assert text == "only this survives"
+        assert any("system_prompt_files" in r.message for r in caplog.records)
+
+
+def test_spawn_system_prompt_files_all_missing_falls_back(tmp_path):
+    missing = tmp_path / "missing.md"
+    with patch("synapse_core.providers.cc.subprocess.Popen") as Popen:
+        Popen.return_value = _make_fake_popen([])
+        p = _provider(
+            system_prompts=[QUOTE_SYSTEM_PROMPT],
+            system_prompt_files=[str(missing)],
+        )
+        p.spawn()
+        cmd = Popen.call_args[0][0]
+        assert "--system-prompt" not in cmd
+        assert cmd.count("--append-system-prompt") == 1
+        assert cmd[cmd.index("--append-system-prompt") + 1] == QUOTE_SYSTEM_PROMPT
+
+
+def test_spawn_system_prompt_files_default_unchanged():
+    with patch("synapse_core.providers.cc.subprocess.Popen") as Popen:
+        Popen.return_value = _make_fake_popen([])
+        p = _provider(system_prompts=[QUOTE_SYSTEM_PROMPT])
+        p.spawn()
+        cmd = Popen.call_args[0][0]
+        assert "--system-prompt" not in cmd
+        assert cmd.count("--append-system-prompt") == 1
+
+
+def test_spawn_system_prompt_files_strips_frontmatter(tmp_path):
+    f = tmp_path / "with_fm.md"
+    f.write_text(
+        "---\ntitle: test\nother: field\n---\nactual body text\n",
+        encoding="utf-8",
+    )
+    with patch("synapse_core.providers.cc.subprocess.Popen") as Popen:
+        Popen.return_value = _make_fake_popen([])
+        p = _provider(system_prompts=[], system_prompt_files=[str(f)])
+        p.spawn()
+        cmd = Popen.call_args[0][0]
+        text = cmd[cmd.index("--system-prompt") + 1]
+        assert text == "actual body text"
+        assert "title: test" not in text
+        assert "---" not in text
+
+
 def test_spawn_omits_model_and_resume_when_unset():
     with patch("synapse_core.providers.cc.subprocess.Popen") as Popen:
         Popen.return_value = _make_fake_popen([])

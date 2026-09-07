@@ -28,7 +28,7 @@ Requires [marrow](https://github.com/Jaynechu/marrow) installed separately.
 
 `config.toml.example` — all sections annotated. Key sections:
 
-- `[provider]` — cc path, cwd, marrow toggle
+- `[provider]` — cc path, cwd, marrow toggle, `system_prompt_files` (replace default system prompt)
 - `[persona]` — user/assistant display names
 - `[cwd_presets]` — named shortcuts for `/cwd N` (key = menu label, order = digit)
 - `[marrow]` — db path + sessionend command template

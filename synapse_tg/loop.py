@@ -480,6 +480,7 @@ class TgLoop:
             effort_level=state.effort_level,
             stderr_log=Path.home() / "Library/Logs/synapse-tg-cc-stderr.log",
             system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT],
+            system_prompt_files=cfg.system_prompt_files,
             idle_soft_s=cfg.idle_soft_s,
             idle_hard_s=cfg.idle_hard_s,
             tool_idle_hard_s=cfg.tool_idle_hard_s,

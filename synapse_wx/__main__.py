@@ -248,6 +248,7 @@ def main() -> int:
                 WX_BUBBLE_FORMAT_PROMPT,
                 NIGHT_SYSTEM_PROMPT,
             ],
+            system_prompt_files=cfg.system_prompt_files,
             marrow_bridge=True,
             channel=CHANNEL,
             idle_soft_s=cfg.idle_soft_s,

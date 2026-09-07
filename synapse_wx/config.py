@@ -33,6 +33,9 @@ class Config:
     target_wxid: str = ""
     marrow_repo_cmd: str = ""
     cc_cwd: str = ""  # cwd cc subprocess spawns in; empty = $HOME
+    # Files whose contents REPLACE cc's default system prompt (concatenated
+    # in order, bridge protocol prompts appended after). Empty = unchanged.
+    system_prompt_files: list[str] = field(default_factory=list)
     user_name: str = ""  # [persona] display name for injected signal text
     # Seeds BridgeState.model on a bridge that has never been switched. A
     # persisted /model choice wins over it; empty = let cc pick its own.
@@ -168,6 +171,9 @@ def load_config(path: Path | None = None) -> Config:
         if isinstance(val, str):
             cfg.cc_cwd = val
     if isinstance(provider, dict):
+        spf = provider.get("system_prompt_files")
+        if isinstance(spf, list):
+            cfg.system_prompt_files = [str(x) for x in spf]
         soft = provider.get("idle_soft_s")
         if isinstance(soft, (int, float)) and not isinstance(soft, bool) and soft > 0:
             cfg.idle_soft_s = float(soft)

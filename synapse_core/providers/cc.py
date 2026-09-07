@@ -44,6 +44,19 @@ def _drain_stderr(
         except Exception:
             pass
 
+def _strip_frontmatter(text: str) -> str:
+    """Drop a leading YAML frontmatter block (```---\n...\n---```) if present."""
+    if not text.startswith("---"):
+        return text
+    lines = text.splitlines(keepends=True)
+    if lines[0].strip() != "---":
+        return text
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "".join(lines[i + 1 :])
+    return text
+
+
 _USAGE_KEYS = (
     "input_tokens",
     "output_tokens",
@@ -148,6 +161,7 @@ class ClaudeCodeProvider(Provider):
         channel: str,
         stderr_log: Path | None = None,
         system_prompts: list[str] = (),
+        system_prompt_files: list[str] = (),
         marrow_bridge: bool = False,
         idle_soft_s: float = _DEFAULT_IDLE_SOFT_S,
         idle_hard_s: float = _DEFAULT_IDLE_HARD_S,
@@ -165,6 +179,9 @@ class ClaudeCodeProvider(Provider):
         self.effort_level = effort_level
         self.stderr_log = stderr_log
         self.system_prompts = list(system_prompts)
+        # Files replace cc's default system prompt entirely (--system-prompt)
+        # instead of appending. Read at spawn time, not here — see _build_cmd.
+        self.system_prompt_files = list(system_prompt_files)
         self.marrow_bridge = marrow_bridge
         self.channel = channel
         self.idle_soft_s = idle_soft_s
@@ -219,6 +236,27 @@ class ClaudeCodeProvider(Provider):
             cmd += ["--resume", self.resume_sid]
         if self.effort_level:
             cmd += ["--effort", self.effort_level]
+        # If system_prompt_files are configured, they REPLACE cc's default
+        # system prompt (--system-prompt) instead of appending to it. Bridge
+        # protocol prompts (quote/media/bubble/silence/night) still get
+        # concatenated on afterward so the bridge keeps working. Falls back
+        # to the append-only behaviour below if no file is readable.
+        file_texts = []
+        for path in self.system_prompt_files:
+            try:
+                raw = Path(path).expanduser().read_text(encoding="utf-8")
+            except OSError as e:
+                log.warning("system_prompt_files: skip unreadable %s: %s", path, e)
+                continue
+            text = _strip_frontmatter(raw).strip()
+            if text:
+                file_texts.append(text)
+        if file_texts:
+            cmd += [
+                "--system-prompt",
+                "\n\n".join([*file_texts, *self.system_prompts]),
+            ]
+            return cmd
         # Teach cc the bridge-specific <quote> + media-tag protocols once per
         # session. On --resume, cc replays prior turns so the appended prompt
         # persists; injecting per-turn would pollute context, hence here only.
