@@ -34,6 +34,7 @@ from synapse_core.providers.codex import CodexProvider, is_codex_model
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.state import BridgeState, remember_resolved_model
 from synapse_core.text_clean import strip_tool_xml
+from synapse_core.translate import default_translate_cmd, needs_translation, translate
 
 from .media.inbound import (
     build_read_instruction,
@@ -1584,6 +1585,16 @@ class TgLoop:
         await self._emit_notice(bot, chat_id, text)
 
 
+    async def _resolve_thinking_text(self, thinking: str) -> str:
+        """Translate `thinking` per config, if configured and warranted. Falls
+        back to the original text on missing config or translate() failure."""
+        target = self._cfg.thinking_translate_to
+        if not target or not needs_translation(thinking, target):
+            return thinking
+        cmd = default_translate_cmd(self._cfg.cc_path, self._cfg.thinking_translate_model)
+        translated = await translate(thinking, target, cmd)
+        return translated or thinking
+
     async def _deliver_reply(
         self, bot: Bot, chat_id: int, response: str, thinking: str
     ) -> None:
@@ -1597,6 +1608,7 @@ class TgLoop:
 
         # Thinking bubble: send before the early-return so silent turns still show it.
         if thinking and self._state.thinking_on:
+            thinking = await self._resolve_thinking_text(thinking)
             think_bubbles = pack_for_tg(thinking)
             n = len(think_bubbles)
             for i, bubble_text in enumerate(think_bubbles, start=1):

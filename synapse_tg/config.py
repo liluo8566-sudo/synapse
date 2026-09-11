@@ -167,6 +167,10 @@ class TgConfig:
     bark_icon: str = ""
     bark_max_chars: int = 150
 
+    # Thinking-bubble translation ([provider] section). Empty target = off.
+    thinking_translate_to: str = ""
+    thinking_translate_model: str = "claude-haiku-4-5-20251001"
+
     # TTS ([tts] section). Effective only when enabled AND api_key AND voice_id are set.
     tts_enabled: bool = False
     tts_api_key: str = ""
@@ -355,6 +359,10 @@ def load_config(path: Path | None = None) -> TgConfig:
         storm = provider.get("unsolicited_storm_cap")
         if isinstance(storm, int) and not isinstance(storm, bool) and storm >= 0:
             cfg.unsolicited_storm_cap = storm
+        if isinstance(provider.get("thinking_translate_to"), str):
+            cfg.thinking_translate_to = provider["thinking_translate_to"]
+        if isinstance(provider.get("thinking_translate_model"), str) and provider["thinking_translate_model"]:
+            cfg.thinking_translate_model = provider["thinking_translate_model"]
 
     storage = data.get("storage") or {}
     if isinstance(storage, dict):

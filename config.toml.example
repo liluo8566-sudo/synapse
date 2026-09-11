@@ -133,6 +133,10 @@ unsolicited_storm_cap = 5
 # instead of appending to it. Concatenated in list order; bridge protocol
 # prompts (quote/media/bubble/etc) are appended after. Empty = unchanged (append).
 system_prompt_files = []
+# Auto-translate thinking bubbles into this language (e.g. "zh"). Empty = off.
+thinking_translate_to = ""
+# Model used for the translation subprocess.
+thinking_translate_model = "claude-haiku-4-5-20251001"
 
 [storage]
 # Runtime data directory. Default: ~/.config/synapse-{channel}/
