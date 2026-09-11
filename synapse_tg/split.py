@@ -153,6 +153,24 @@ def split_for_tg(text: str, limit: int = DEFAULT_LIMIT) -> list[str]:
     return [c for c in chunks if c]
 
 
+def pack_for_tg(text: str, limit: int = 3500) -> list[str]:
+    """Split then greedily merge pieces into as few <=limit chunks as possible."""
+    pieces = split_for_tg(text, limit)
+    if not pieces:
+        return []
+    packed: list[str] = []
+    buf = pieces[0]
+    for piece in pieces[1:]:
+        candidate = buf + "\n\n" + piece
+        if len(candidate) <= limit:
+            buf = candidate
+        else:
+            packed.append(buf)
+            buf = piece
+    packed.append(buf)
+    return packed
+
+
 def split_for_tg_typed(
     text: str, limit: int = DEFAULT_LIMIT
 ) -> list[dict[str, str]]:

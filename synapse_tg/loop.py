@@ -47,7 +47,7 @@ from .markdown import gfm_to_tg_html
 from .media.outbound import send_media
 from . import bark as _bark
 from .shell import _tzinfo
-from .split import split_for_tg_typed
+from .split import pack_for_tg, split_for_tg_typed
 from . import tts as _tts
 from .typing_action import TypingAction
 
@@ -1597,14 +1597,16 @@ class TgLoop:
 
         # Thinking bubble: send before the early-return so silent turns still show it.
         if thinking and self._state.thinking_on:
-            truncated = thinking[:2000]
-            if len(thinking) > 2000:
-                truncated += f"\n... ({len(thinking)} chars total)"
-            think_html = f"<tg-spoiler><blockquote expandable>\U0001f4ad\n{gfm_to_tg_html(truncated)}</blockquote></tg-spoiler>"
-            try:
-                await bot.send_message(chat_id=chat_id, text=think_html, parse_mode="HTML")
-            except Exception as e:
-                logger.warning("thinking send failed: %s", e)
+            think_bubbles = pack_for_tg(thinking)
+            n = len(think_bubbles)
+            for i, bubble_text in enumerate(think_bubbles, start=1):
+                prefix = "\U0001f4ad\n" if n == 1 else f"\U0001f4ad ({i}/{n})\n"
+                think_html = f"<tg-spoiler><blockquote expandable>{prefix}{gfm_to_tg_html(bubble_text)}</blockquote></tg-spoiler>"
+                try:
+                    await bot.send_message(chat_id=chat_id, text=think_html, parse_mode="HTML")
+                except Exception as e:
+                    logger.warning("thinking send failed (bubble %d/%d): %s", i, n, e)
+                    break
 
         if not response:
             return
