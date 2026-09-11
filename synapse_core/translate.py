@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -25,15 +26,19 @@ def needs_translation(text: str, target: str) -> bool:
     return True
 
 
+def _prompt(text: str, target: str) -> str:
+    return (
+        f"Translate the following text into {target}. Preserve paragraph "
+        f"breaks and markdown. Output only the translation, nothing else.\n\n{text}"
+    )
+
+
 async def translate(
     text: str, target: str, cmd: list[str], timeout: float = 45.0
 ) -> str | None:
     """Run `cmd`, feed it a translation prompt on stdin, return stripped
     stdout. None on non-zero exit, timeout, or any exception — never raises."""
-    prompt = (
-        f"Translate the following text into {target}. Preserve paragraph "
-        f"breaks and markdown. Output only the translation, nothing else.\n\n{text}"
-    )
+    prompt = _prompt(text, target)
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -68,6 +73,38 @@ async def translate(
         return None
 
     return out.decode("utf-8", "replace").strip()
+
+
+def translate_sync(
+    text: str, target: str, cmd: list[str], timeout: float = 45.0
+) -> str | None:
+    """Sync counterpart of translate() for callers with no running event
+    loop. Same prompt, same None-on-failure/timeout semantics."""
+    prompt = _prompt(text, target)
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=prompt.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("translate_sync: timed out after %.1fs (%s)", timeout, cmd)
+        return None
+    except Exception as e:
+        logger.warning("translate_sync: subprocess error: %s", e)
+        return None
+
+    if proc.returncode != 0:
+        logger.warning(
+            "translate_sync: exit %s: %s",
+            proc.returncode,
+            proc.stderr.decode("utf-8", "replace")[:500],
+        )
+        return None
+
+    return proc.stdout.decode("utf-8", "replace").strip()
 
 
 def default_translate_cmd(claude_bin: str, model: str) -> list[str]:

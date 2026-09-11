@@ -32,7 +32,11 @@ class Config:
     quota_wait_sec: float = 65.0
     target_wxid: str = ""
     marrow_repo_cmd: str = ""
+    cc_path: str = "claude"  # claude binary/command for provider spawn + translate
     cc_cwd: str = ""  # cwd cc subprocess spawns in; empty = $HOME
+    # Thinking-bubble translation ([provider] section). Empty target = off.
+    thinking_translate_to: str = ""
+    thinking_translate_model: str = "claude-haiku-4-5-20251001"
     # Files whose contents REPLACE cc's default system prompt (concatenated
     # in order, bridge protocol prompts appended after). Empty = unchanged.
     system_prompt_files: list[str] = field(default_factory=list)
@@ -171,6 +175,15 @@ def load_config(path: Path | None = None) -> Config:
         if isinstance(val, str):
             cfg.cc_cwd = val
     if isinstance(provider, dict):
+        if isinstance(provider.get("cc_path"), str) and provider["cc_path"]:
+            cfg.cc_path = provider["cc_path"]
+        if isinstance(provider.get("thinking_translate_to"), str):
+            cfg.thinking_translate_to = provider["thinking_translate_to"]
+        if (
+            isinstance(provider.get("thinking_translate_model"), str)
+            and provider["thinking_translate_model"]
+        ):
+            cfg.thinking_translate_model = provider["thinking_translate_model"]
         spf = provider.get("system_prompt_files")
         if isinstance(spf, list):
             cfg.system_prompt_files = [str(x) for x in spf]

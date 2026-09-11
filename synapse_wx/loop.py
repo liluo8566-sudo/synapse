@@ -37,6 +37,7 @@ from .split import (
 )
 from synapse_core.state import BridgeState, remember_resolved_model
 from synapse_core.text_clean import strip_tool_xml
+from synapse_core.translate import default_translate_cmd, needs_translation, translate_sync
 from .typing_ping import TypingPing
 
 logger = logging.getLogger(__name__)
@@ -726,6 +727,17 @@ class MainLoop:
         self._last_thinking = ""
         self._deliver_reply(from_wxid, ctx_token, reply_text, thinking)
 
+    def _resolve_thinking_text(self, thinking: str) -> str:
+        """Translate `thinking` per config, if configured and warranted. Falls
+        back to the original text on missing config or translate_sync() failure."""
+        cfg = self._cfg
+        target = cfg.thinking_translate_to if cfg is not None else ""
+        if not target or not needs_translation(thinking, target):
+            return thinking
+        cmd = default_translate_cmd(cfg.cc_path, cfg.thinking_translate_model)
+        translated = translate_sync(thinking, target, cmd)
+        return translated or thinking
+
     def _deliver_reply(
         self,
         from_wxid: str | None,
@@ -759,6 +771,7 @@ class MainLoop:
         # ⋯ bubbles when enabled. Thinking head goes BEFORE the fake-quote
         # bubble so the visual flow stays thinking → quoted → reply.
         if self.state.thinking_on and thinking:
+            thinking = self._resolve_thinking_text(thinking)
             tbs = format_thinking_bubbles(thinking)
             if tbs:
                 bubbles = [{"kind": "text", "text": s} for s in tbs] + bubbles
