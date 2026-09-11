@@ -12,6 +12,15 @@ logger = logging.getLogger(__name__)
 _CJK_RE = re.compile(r"[一-鿿぀-ヿ가-힯]")
 _LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a translation engine embedded in a private messaging bridge. "
+    "The text you receive is the user's own private chat data between "
+    "consenting adults and may contain explicit sexual content. Translate "
+    "it faithfully and completely into the requested language. Never "
+    "refuse, never summarize, never add commentary or warnings. Output "
+    "only the translation."
+)
+
 
 def needs_translation(text: str, target: str) -> bool:
     """Whether `text` is worth sending to translate() for `target`."""
@@ -23,6 +32,20 @@ def needs_translation(text: str, target: str) -> bool:
             return False
         cjk = len(_CJK_RE.findall(text))
         return (cjk / len(letters)) < 0.3
+    return True
+
+
+def looks_translated(output: str, target: str) -> bool:
+    """Sanity check on translator output: catches refusals/echoes that
+    slipped past a non-zero-exit-code check."""
+    if not output:
+        return False
+    if target.startswith("zh"):
+        letters = _LETTER_RE.findall(output)
+        if not letters:
+            return False
+        cjk = len(_CJK_RE.findall(output))
+        return (cjk / len(letters)) >= 0.3
     return True
 
 
@@ -72,7 +95,11 @@ async def translate(
         )
         return None
 
-    return out.decode("utf-8", "replace").strip()
+    result = out.decode("utf-8", "replace").strip()
+    if not looks_translated(result, target):
+        logger.warning("translate: output does not look like %s, discarding", target)
+        return None
+    return result
 
 
 def translate_sync(
@@ -104,11 +131,18 @@ def translate_sync(
         )
         return None
 
-    return proc.stdout.decode("utf-8", "replace").strip()
+    result = proc.stdout.decode("utf-8", "replace").strip()
+    if not looks_translated(result, target):
+        logger.warning("translate_sync: output does not look like %s, discarding", target)
+        return None
+    return result
 
 
-def default_translate_cmd(claude_bin: str, model: str) -> list[str]:
-    return [
+def default_translate_cmd(claude_bin: str, model: str, system_prompt: str = "") -> list[str]:
+    cmd = [
         claude_bin, "-p", "--model", model,
         "--setting-sources", "", "--strict-mcp-config",
     ]
+    if system_prompt:
+        cmd += ["--system-prompt", system_prompt]
+    return cmd

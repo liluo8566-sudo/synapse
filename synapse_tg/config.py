@@ -7,6 +7,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from synapse_core.translate import DEFAULT_SYSTEM_PROMPT
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "synapse-tg" / "config.toml"
@@ -170,6 +172,7 @@ class TgConfig:
     # Thinking-bubble translation ([provider] section). Empty target = off.
     thinking_translate_to: str = ""
     thinking_translate_model: str = "claude-haiku-4-5-20251001"
+    thinking_translate_system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
     # TTS ([tts] section). Effective only when enabled AND api_key AND voice_id are set.
     tts_enabled: bool = False
@@ -363,6 +366,8 @@ def load_config(path: Path | None = None) -> TgConfig:
             cfg.thinking_translate_to = provider["thinking_translate_to"]
         if isinstance(provider.get("thinking_translate_model"), str) and provider["thinking_translate_model"]:
             cfg.thinking_translate_model = provider["thinking_translate_model"]
+        if isinstance(provider.get("thinking_translate_system_prompt"), str):
+            cfg.thinking_translate_system_prompt = provider["thinking_translate_system_prompt"]
 
     storage = data.get("storage") or {}
     if isinstance(storage, dict):

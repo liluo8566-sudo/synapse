@@ -734,7 +734,9 @@ class MainLoop:
         target = cfg.thinking_translate_to if cfg is not None else ""
         if not target or not needs_translation(thinking, target):
             return thinking
-        cmd = default_translate_cmd(cfg.cc_path, cfg.thinking_translate_model)
+        cmd = default_translate_cmd(
+            cfg.cc_path, cfg.thinking_translate_model, cfg.thinking_translate_system_prompt,
+        )
         translated = translate_sync(thinking, target, cmd)
         return translated or thinking
 

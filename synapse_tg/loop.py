@@ -1591,7 +1591,10 @@ class TgLoop:
         target = self._cfg.thinking_translate_to
         if not target or not needs_translation(thinking, target):
             return thinking
-        cmd = default_translate_cmd(self._cfg.cc_path, self._cfg.thinking_translate_model)
+        cmd = default_translate_cmd(
+            self._cfg.cc_path, self._cfg.thinking_translate_model,
+            self._cfg.thinking_translate_system_prompt,
+        )
         translated = await translate(thinking, target, cmd)
         return translated or thinking
 

@@ -6,7 +6,14 @@ import sys
 
 import pytest
 
-from synapse_core.translate import needs_translation, translate, translate_sync
+from synapse_core.translate import (
+    DEFAULT_SYSTEM_PROMPT,
+    default_translate_cmd,
+    looks_translated,
+    needs_translation,
+    translate,
+    translate_sync,
+)
 from synapse_tg.config import TgConfig
 from synapse_tg.loop import TgLoop
 from synapse_wx.config import Config as WxConfig
@@ -42,6 +49,38 @@ def test_needs_translation_non_zh_target_true_unless_empty() -> None:
     assert needs_translation("", "fr") is False
 
 
+# ── looks_translated ─────────────────────────────────────────────────
+
+
+def test_looks_translated_chinese_true() -> None:
+    assert looks_translated("这是一段纯中文文本，不需要翻译。", "zh-CN") is True
+
+
+def test_looks_translated_english_refusal_false() -> None:
+    assert looks_translated("I'm not able to help with this request.", "zh-CN") is False
+
+
+def test_looks_translated_empty_false() -> None:
+    assert looks_translated("", "zh") is False
+
+
+def test_looks_translated_non_zh_target_non_empty_true() -> None:
+    assert looks_translated("Bonjour tout le monde", "fr") is True
+
+
+# ── default_translate_cmd ────────────────────────────────────────────
+
+
+def test_default_translate_cmd_no_system_prompt() -> None:
+    cmd = default_translate_cmd("claude", "haiku")
+    assert "--system-prompt" not in cmd
+
+
+def test_default_translate_cmd_with_system_prompt() -> None:
+    cmd = default_translate_cmd("claude", "haiku", DEFAULT_SYSTEM_PROMPT)
+    assert cmd[-2:] == ["--system-prompt", DEFAULT_SYSTEM_PROMPT]
+
+
 # ── translate() ───────────────────────────────────────────────────────
 
 _UPPER_CMD = [
@@ -50,17 +89,27 @@ _UPPER_CMD = [
 ]
 _FAIL_CMD = [sys.executable, "-c", "import sys; sys.exit(1)"]
 _SLEEP_CMD = [sys.executable, "-c", "import time; time.sleep(5)"]
+_REFUSE_CMD = [
+    sys.executable, "-c",
+    "print(\"I'm not able to help with this request.\")",
+]
 
 
 @pytest.mark.asyncio
 async def test_translate_returns_transformed_text() -> None:
-    result = await translate("hello world", "zh", _UPPER_CMD)
+    result = await translate("hello world", "fr", _UPPER_CMD)
     assert result == "HELLO WORLD"
 
 
 @pytest.mark.asyncio
 async def test_translate_failing_command_returns_none() -> None:
     result = await translate("hello", "zh", _FAIL_CMD)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_translate_refusal_returns_none() -> None:
+    result = await translate("hello", "zh-CN", _REFUSE_CMD)
     assert result is None
 
 
@@ -78,12 +127,17 @@ async def test_translate_timeout_returns_none_quickly() -> None:
 
 
 def test_translate_sync_returns_transformed_text() -> None:
-    result = translate_sync("hello world", "zh", _UPPER_CMD)
+    result = translate_sync("hello world", "fr", _UPPER_CMD)
     assert result == "HELLO WORLD"
 
 
 def test_translate_sync_failing_command_returns_none() -> None:
     result = translate_sync("hello", "zh", _FAIL_CMD)
+    assert result is None
+
+
+def test_translate_sync_refusal_returns_none() -> None:
+    result = translate_sync("hello", "zh-CN", _REFUSE_CMD)
     assert result is None
 
 
@@ -94,6 +148,36 @@ def test_translate_sync_timeout_returns_none_quickly() -> None:
     elapsed = time.monotonic() - start
     assert result is None
     assert elapsed < 3.0
+
+
+# ── TgConfig.thinking_translate_system_prompt loader ────────────────
+
+
+def test_tg_config_system_prompt_default(tmp_path) -> None:
+    from synapse_tg.config import load_config as tg_load_config
+
+    p = tmp_path / "config.toml"
+    p.write_text("[provider]\n")
+    cfg = tg_load_config(p)
+    assert cfg.thinking_translate_system_prompt == DEFAULT_SYSTEM_PROMPT
+
+
+def test_tg_config_system_prompt_override(tmp_path) -> None:
+    from synapse_tg.config import load_config as tg_load_config
+
+    p = tmp_path / "config.toml"
+    p.write_text('[provider]\nthinking_translate_system_prompt = "custom prompt"\n')
+    cfg = tg_load_config(p)
+    assert cfg.thinking_translate_system_prompt == "custom prompt"
+
+
+def test_tg_config_system_prompt_empty_override(tmp_path) -> None:
+    from synapse_tg.config import load_config as tg_load_config
+
+    p = tmp_path / "config.toml"
+    p.write_text('[provider]\nthinking_translate_system_prompt = ""\n')
+    cfg = tg_load_config(p)
+    assert cfg.thinking_translate_system_prompt == ""
 
 
 # ── TgLoop._resolve_thinking_text ───────────────────────────────────

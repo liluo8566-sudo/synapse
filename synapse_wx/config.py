@@ -7,6 +7,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from synapse_core.translate import DEFAULT_SYSTEM_PROMPT
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "synapse-wx" / "config.toml"
@@ -37,6 +39,7 @@ class Config:
     # Thinking-bubble translation ([provider] section). Empty target = off.
     thinking_translate_to: str = ""
     thinking_translate_model: str = "claude-haiku-4-5-20251001"
+    thinking_translate_system_prompt: str = DEFAULT_SYSTEM_PROMPT
     # Files whose contents REPLACE cc's default system prompt (concatenated
     # in order, bridge protocol prompts appended after). Empty = unchanged.
     system_prompt_files: list[str] = field(default_factory=list)
@@ -184,6 +187,8 @@ def load_config(path: Path | None = None) -> Config:
             and provider["thinking_translate_model"]
         ):
             cfg.thinking_translate_model = provider["thinking_translate_model"]
+        if isinstance(provider.get("thinking_translate_system_prompt"), str):
+            cfg.thinking_translate_system_prompt = provider["thinking_translate_system_prompt"]
         spf = provider.get("system_prompt_files")
         if isinstance(spf, list):
             cfg.system_prompt_files = [str(x) for x in spf]
