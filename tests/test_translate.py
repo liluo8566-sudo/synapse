@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -180,7 +181,7 @@ def test_tg_config_system_prompt_empty_override(tmp_path) -> None:
     assert cfg.thinking_translate_system_prompt == ""
 
 
-# ── TgLoop._resolve_thinking_text ───────────────────────────────────
+# ── TgLoop._translate_thinking_in_place ──────────────────────────────
 
 
 def _loop(tmp_path, **cfg_kwargs):
@@ -189,49 +190,100 @@ def _loop(tmp_path, **cfg_kwargs):
 
 
 @pytest.mark.asyncio
-async def test_resolve_thinking_text_substitutes_translation(tmp_path, monkeypatch) -> None:
+async def test_translate_thinking_in_place_same_count_edits_only(tmp_path, monkeypatch) -> None:
     loop = _loop(tmp_path, thinking_translate_to="zh")
+    monkeypatch.setattr("synapse_tg.loop.pack_for_tg", lambda text: ["a", "b"])
 
     async def fake_translate(text, target, cmd, timeout=45.0):
-        return f"[translated:{target}] {text}"
+        return "translated"
 
     monkeypatch.setattr("synapse_tg.loop.translate", fake_translate)
-    out = await loop._resolve_thinking_text("I am thinking about this.")
-    assert out == "[translated:zh] I am thinking about this."
+    bot = AsyncMock()
+    await loop._translate_thinking_in_place(bot, 123, [10, 11], "original")
+
+    assert bot.edit_message_text.await_count == 2
+    bot.delete_message.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_resolve_thinking_text_falls_back_on_none(tmp_path, monkeypatch) -> None:
+async def test_translate_thinking_in_place_fewer_bubbles_edits_and_deletes(
+    tmp_path, monkeypatch
+) -> None:
+    loop = _loop(tmp_path, thinking_translate_to="zh")
+    monkeypatch.setattr("synapse_tg.loop.pack_for_tg", lambda text: ["a"])
+
+    async def fake_translate(text, target, cmd, timeout=45.0):
+        return "translated"
+
+    monkeypatch.setattr("synapse_tg.loop.translate", fake_translate)
+    bot = AsyncMock()
+    await loop._translate_thinking_in_place(bot, 123, [10, 11, 12], "original")
+
+    assert bot.edit_message_text.await_count == 1
+    assert bot.edit_message_text.await_args.kwargs["message_id"] == 10
+    assert bot.delete_message.await_count == 2
+    deleted_ids = {c.kwargs["message_id"] for c in bot.delete_message.await_args_list}
+    assert deleted_ids == {11, 12}
+    bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_translate_thinking_in_place_more_bubbles_edits_and_sends(
+    tmp_path, monkeypatch
+) -> None:
+    loop = _loop(tmp_path, thinking_translate_to="zh")
+    monkeypatch.setattr("synapse_tg.loop.pack_for_tg", lambda text: ["a", "b"])
+
+    async def fake_translate(text, target, cmd, timeout=45.0):
+        return "translated"
+
+    monkeypatch.setattr("synapse_tg.loop.translate", fake_translate)
+    bot = AsyncMock()
+    await loop._translate_thinking_in_place(bot, 123, [10], "original")
+
+    assert bot.edit_message_text.await_count == 1
+    assert bot.edit_message_text.await_args.kwargs["message_id"] == 10
+    bot.delete_message.assert_not_awaited()
+    assert bot.send_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_translate_thinking_in_place_none_makes_no_bot_calls(tmp_path, monkeypatch) -> None:
     loop = _loop(tmp_path, thinking_translate_to="zh")
 
     async def fake_translate(text, target, cmd, timeout=45.0):
         return None
 
     monkeypatch.setattr("synapse_tg.loop.translate", fake_translate)
-    original = "I am thinking about this."
-    out = await loop._resolve_thinking_text(original)
-    assert out == original
+    bot = AsyncMock()
+    await loop._translate_thinking_in_place(bot, 123, [10, 11], "original")
+
+    bot.edit_message_text.assert_not_awaited()
+    bot.delete_message.assert_not_awaited()
+    bot.send_message.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_resolve_thinking_text_off_by_default(tmp_path) -> None:
-    loop = _loop(tmp_path)
-    original = "I am thinking about this."
-    out = await loop._resolve_thinking_text(original)
-    assert out == original
+# ── MainLoop (wx)._deliver_reply — translation ordering ──────────────
 
 
-# ── MainLoop (wx)._resolve_thinking_text ────────────────────────────
+class _FakeILink:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send_text(self, to_user_id, ctx_token, text, **_kwargs) -> bool:
+        self.sent.append(text)
+        return True
 
 
-def _wx_loop(tmp_path, **cfg_kwargs) -> WxLoop:
+def _wx_loop(tmp_path, ilink=None, **cfg_kwargs) -> WxLoop:
     from synapse_core.debounce import InboundBuffer
     from synapse_core.sessionend.tracker import SessionTracker
     from synapse_core.state import BridgeState
 
     cfg = WxConfig(**cfg_kwargs)
     return WxLoop(
-        ilink=None,
+        ilink=ilink if ilink is not None else _FakeILink(),
         provider_factory=lambda *_a, **_k: None,
         state=BridgeState(),
         sessions=SessionTracker(state_path=tmp_path / "sessions.json"),
@@ -245,31 +297,43 @@ def _wx_loop(tmp_path, **cfg_kwargs) -> WxLoop:
     )
 
 
-def test_wx_resolve_thinking_text_substitutes_translation(tmp_path, monkeypatch) -> None:
-    loop = _wx_loop(tmp_path, thinking_translate_to="zh")
+def test_wx_deliver_reply_translation_configured_reply_then_translated_thinking(
+    tmp_path, monkeypatch
+) -> None:
+    ilink = _FakeILink()
+    loop = _wx_loop(tmp_path, ilink=ilink, thinking_translate_to="zh")
+    loop.state.thinking_on = True
 
     def fake_translate_sync(text, target, cmd, timeout=45.0):
         return f"[translated:{target}] {text}"
 
     monkeypatch.setattr("synapse_wx.loop.translate_sync", fake_translate_sync)
-    out = loop._resolve_thinking_text("I am thinking about this.")
-    assert out == "[translated:zh] I am thinking about this."
+    loop._deliver_reply("wxid-1", "ctx-1", "the reply", "the thinking")
+
+    assert ilink.sent == ["the reply", "\U0001f4ad[translated:zh] the thinking"]
 
 
-def test_wx_resolve_thinking_text_falls_back_on_none(tmp_path, monkeypatch) -> None:
-    loop = _wx_loop(tmp_path, thinking_translate_to="zh")
+def test_wx_deliver_reply_translation_none_falls_back_reply_then_original(
+    tmp_path, monkeypatch
+) -> None:
+    ilink = _FakeILink()
+    loop = _wx_loop(tmp_path, ilink=ilink, thinking_translate_to="zh")
+    loop.state.thinking_on = True
 
     def fake_translate_sync(text, target, cmd, timeout=45.0):
         return None
 
     monkeypatch.setattr("synapse_wx.loop.translate_sync", fake_translate_sync)
-    original = "I am thinking about this."
-    out = loop._resolve_thinking_text(original)
-    assert out == original
+    loop._deliver_reply("wxid-1", "ctx-1", "the reply", "the thinking")
+
+    assert ilink.sent == ["the reply", "\U0001f4adthe thinking"]
 
 
-def test_wx_resolve_thinking_text_off_by_default(tmp_path) -> None:
-    loop = _wx_loop(tmp_path)
-    original = "I am thinking about this."
-    out = loop._resolve_thinking_text(original)
-    assert out == original
+def test_wx_deliver_reply_translation_off_thinking_then_reply(tmp_path) -> None:
+    ilink = _FakeILink()
+    loop = _wx_loop(tmp_path, ilink=ilink)
+    loop.state.thinking_on = True
+
+    loop._deliver_reply("wxid-1", "ctx-1", "the reply", "the thinking")
+
+    assert ilink.sent == ["\U0001f4adthe thinking", "the reply"]

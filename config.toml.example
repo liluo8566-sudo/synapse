@@ -139,6 +139,8 @@ thinking_translate_to = ""
 thinking_translate_model = "claude-haiku-4-5-20251001"
 # Overrides the built-in translator system prompt. Empty = none.
 thinking_translate_system_prompt = ""
+# Timeout (seconds) for the translation subprocess.
+thinking_translate_timeout = 120.0
 
 [storage]
 # Runtime data directory. Default: ~/.config/synapse-{channel}/

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 import subprocess
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ async def translate(
     """Run `cmd`, feed it a translation prompt on stdin, return stripped
     stdout. None on non-zero exit, timeout, or any exception — never raises."""
     prompt = _prompt(text, target)
+    start = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -99,6 +101,10 @@ async def translate(
     if not looks_translated(result, target):
         logger.warning("translate: output does not look like %s, discarding", target)
         return None
+    logger.info(
+        "translate: ok in %.1fs (%d -> %d chars)",
+        time.monotonic() - start, len(text), len(result),
+    )
     return result
 
 
@@ -108,6 +114,7 @@ def translate_sync(
     """Sync counterpart of translate() for callers with no running event
     loop. Same prompt, same None-on-failure/timeout semantics."""
     prompt = _prompt(text, target)
+    start = time.monotonic()
     try:
         proc = subprocess.run(
             cmd,
@@ -135,6 +142,10 @@ def translate_sync(
     if not looks_translated(result, target):
         logger.warning("translate_sync: output does not look like %s, discarding", target)
         return None
+    logger.info(
+        "translate_sync: ok in %.1fs (%d -> %d chars)",
+        time.monotonic() - start, len(text), len(result),
+    )
     return result
 
 

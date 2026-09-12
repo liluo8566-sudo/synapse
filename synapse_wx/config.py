@@ -40,6 +40,7 @@ class Config:
     thinking_translate_to: str = ""
     thinking_translate_model: str = "claude-haiku-4-5-20251001"
     thinking_translate_system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    thinking_translate_timeout: float = 120.0
     # Files whose contents REPLACE cc's default system prompt (concatenated
     # in order, bridge protocol prompts appended after). Empty = unchanged.
     system_prompt_files: list[str] = field(default_factory=list)
@@ -189,6 +190,9 @@ def load_config(path: Path | None = None) -> Config:
             cfg.thinking_translate_model = provider["thinking_translate_model"]
         if isinstance(provider.get("thinking_translate_system_prompt"), str):
             cfg.thinking_translate_system_prompt = provider["thinking_translate_system_prompt"]
+        timeout = provider.get("thinking_translate_timeout")
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0:
+            cfg.thinking_translate_timeout = float(timeout)
         spf = provider.get("system_prompt_files")
         if isinstance(spf, list):
             cfg.system_prompt_files = [str(x) for x in spf]

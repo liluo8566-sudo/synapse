@@ -727,61 +727,12 @@ class MainLoop:
         self._last_thinking = ""
         self._deliver_reply(from_wxid, ctx_token, reply_text, thinking)
 
-    def _resolve_thinking_text(self, thinking: str) -> str:
-        """Translate `thinking` per config, if configured and warranted. Falls
-        back to the original text on missing config or translate_sync() failure."""
-        cfg = self._cfg
-        target = cfg.thinking_translate_to if cfg is not None else ""
-        if not target or not needs_translation(thinking, target):
-            return thinking
-        cmd = default_translate_cmd(
-            cfg.cc_path, cfg.thinking_translate_model, cfg.thinking_translate_system_prompt,
-        )
-        translated = translate_sync(thinking, target, cmd)
-        return translated or thinking
-
-    def _deliver_reply(
-        self,
-        from_wxid: str | None,
-        ctx_token: str,
-        reply_text: str,
-        thinking: str,
+    def _send_bubbles(
+        self, from_wxid: str, ctx_token: str, bubbles: list[dict]
     ) -> None:
-        """Send one completed turn (quote-tag resolution + thinking bubbles +
-        split + media + per-bubble retry). Shared by the solicited reply path
-        (maybe_flush) and unsolicited (background-task) turns so both deliver
-        identically. Stops the active TypingPing after the first bubble lands."""
-        if not from_wxid or (not reply_text and not thinking):
-            self._stop_typing()
-            return
-        # HTML-comment silence protocol: strip complete <!-- ... --> comments.
-        reply_text = strip_html_comments(reply_text)
-        # Quote-lite: extract <quote>FRAGMENT</quote> from the WHOLE reply
-        # BEFORE splitting on newlines. Pre-split extraction guarantees a
-        # multi-line tag never leaks across bubbles as literal text. The
-        # FRAGMENT becomes a standalone visual fake-quote bubble prepended
-        # to the reply (▎FRAGMENT, truncated). The real ref_msg outbound
-        # path was removed — WeChat does NOT render it.
-        reply_text, fake_quote_bubbles = self._extract_quote_from_reply(reply_text)
-        bubbles: list[dict] = split_for_wechat_typed(reply_text)
-        # Tag stripping is unconditional; only the decorative fake-quote bubbles
-        # are gated behind /quote on so Lumi's default-off feed stays clean.
-        if fake_quote_bubbles and self.state.quote_on:
-            fqb = [{"kind": "text", "text": b} for b in fake_quote_bubbles]
-            bubbles = fqb + bubbles
-        # /thinking: prepend full thinking content as one or more 【思考】 /
-        # ⋯ bubbles when enabled. Thinking head goes BEFORE the fake-quote
-        # bubble so the visual flow stays thinking → quoted → reply.
-        if self.state.thinking_on and thinking:
-            thinking = self._resolve_thinking_text(thinking)
-            tbs = format_thinking_bubbles(thinking)
-            if tbs:
-                bubbles = [{"kind": "text", "text": s} for s in tbs] + bubbles
-        # Hard bubble cap at the outbound edge (main quota defense): merge
-        # adjacent text bubbles until the turn fits within _bubble_cap. Media
-        # bubbles never merge and keep their order.
-        if len(bubbles) > self._bubble_cap:
-            bubbles = merge_bubbles_to_cap(bubbles, self._bubble_cap)
+        """Send a list of already-built bubbles (text/media) with per-bubble
+        retry/alert/typing-stop handling. Shared by the main reply send and
+        the post-reply translated-thinking send."""
         total = len(bubbles)
         for i, bubble in enumerate(bubbles):
             try:
@@ -836,6 +787,73 @@ class MainLoop:
                 self._stop_typing()
             if i < total - 1:
                 self._sleeper(self._bubble_gap_sec)
+
+    def _deliver_reply(
+        self,
+        from_wxid: str | None,
+        ctx_token: str,
+        reply_text: str,
+        thinking: str,
+    ) -> None:
+        """Send one completed turn (quote-tag resolution + thinking bubbles +
+        split + media + per-bubble retry). Shared by the solicited reply path
+        (maybe_flush) and unsolicited (background-task) turns so both deliver
+        identically. Stops the active TypingPing after the first bubble lands.
+
+        When thinking-translation is configured and warranted, the reply goes
+        out FIRST and the (blocking) translation + thinking bubbles follow —
+        the flush thread is already past anything time-critical for this turn
+        at that point. Otherwise thinking is sent first, as before."""
+        if not from_wxid or (not reply_text and not thinking):
+            self._stop_typing()
+            return
+        # HTML-comment silence protocol: strip complete <!-- ... --> comments.
+        reply_text = strip_html_comments(reply_text)
+        # Quote-lite: extract <quote>FRAGMENT</quote> from the WHOLE reply
+        # BEFORE splitting on newlines. Pre-split extraction guarantees a
+        # multi-line tag never leaks across bubbles as literal text. The
+        # FRAGMENT becomes a standalone visual fake-quote bubble prepended
+        # to the reply (▎FRAGMENT, truncated). The real ref_msg outbound
+        # path was removed — WeChat does NOT render it.
+        reply_text, fake_quote_bubbles = self._extract_quote_from_reply(reply_text)
+        bubbles: list[dict] = split_for_wechat_typed(reply_text)
+        # Tag stripping is unconditional; only the decorative fake-quote bubbles
+        # are gated behind /quote on so Lumi's default-off feed stays clean.
+        if fake_quote_bubbles and self.state.quote_on:
+            fqb = [{"kind": "text", "text": b} for b in fake_quote_bubbles]
+            bubbles = fqb + bubbles
+
+        cfg = self._cfg
+        target = cfg.thinking_translate_to if cfg is not None else ""
+        translate_after = bool(thinking) and bool(target) and needs_translation(thinking, target)
+
+        # /thinking: prepend full thinking content as one or more 💭 bubbles
+        # when enabled — unless translation will run, in which case the
+        # (translated) thinking bubble is sent after the reply instead.
+        if self.state.thinking_on and thinking and not translate_after:
+            tbs = format_thinking_bubbles(thinking)
+            if tbs:
+                bubbles = [{"kind": "text", "text": s} for s in tbs] + bubbles
+
+        # Hard bubble cap at the outbound edge (main quota defense): merge
+        # adjacent text bubbles until the turn fits within _bubble_cap. Media
+        # bubbles never merge and keep their order.
+        if len(bubbles) > self._bubble_cap:
+            bubbles = merge_bubbles_to_cap(bubbles, self._bubble_cap)
+
+        self._send_bubbles(from_wxid, ctx_token, bubbles)
+
+        if self.state.thinking_on and translate_after:
+            cmd = default_translate_cmd(
+                cfg.cc_path, cfg.thinking_translate_model, cfg.thinking_translate_system_prompt,
+            )
+            translated = translate_sync(
+                thinking, target, cmd, timeout=cfg.thinking_translate_timeout
+            )
+            tbs = format_thinking_bubbles(translated or thinking)
+            if tbs:
+                think_bubbles = [{"kind": "text", "text": s} for s in tbs]
+                self._send_bubbles(from_wxid, ctx_token, think_bubbles)
 
     def _extract_quote_from_reply(
         self, reply_text: str

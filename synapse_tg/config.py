@@ -173,6 +173,7 @@ class TgConfig:
     thinking_translate_to: str = ""
     thinking_translate_model: str = "claude-haiku-4-5-20251001"
     thinking_translate_system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    thinking_translate_timeout: float = 120.0
 
     # TTS ([tts] section). Effective only when enabled AND api_key AND voice_id are set.
     tts_enabled: bool = False
@@ -368,6 +369,9 @@ def load_config(path: Path | None = None) -> TgConfig:
             cfg.thinking_translate_model = provider["thinking_translate_model"]
         if isinstance(provider.get("thinking_translate_system_prompt"), str):
             cfg.thinking_translate_system_prompt = provider["thinking_translate_system_prompt"]
+        timeout = provider.get("thinking_translate_timeout")
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0:
+            cfg.thinking_translate_timeout = float(timeout)
 
     storage = data.get("storage") or {}
     if isinstance(storage, dict):

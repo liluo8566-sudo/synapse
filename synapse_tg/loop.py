@@ -81,6 +81,12 @@ def _is_unsolicited_first_event(ev: dict) -> bool:
     return ev.get("type") == "system" and ev.get("subtype") == "task_notification"
 
 
+def _think_html(prefix: str, text: str) -> str:
+    """Shared spoiler-blockquote wrapper for a thinking bubble, used by the
+    initial send and the later in-place translation edit."""
+    return f"<tg-spoiler><blockquote expandable>{prefix}{gfm_to_tg_html(text)}</blockquote></tg-spoiler>"
+
+
 class _NullTyping:
     """No-op typing sink for draining a turn with no chat target."""
 
@@ -1585,18 +1591,52 @@ class TgLoop:
         await self._emit_notice(bot, chat_id, text)
 
 
-    async def _resolve_thinking_text(self, thinking: str) -> str:
-        """Translate `thinking` per config, if configured and warranted. Falls
-        back to the original text on missing config or translate() failure."""
+    async def _translate_thinking_in_place(
+        self, bot: Bot, chat_id: int, sent_ids: list[int], thinking: str
+    ) -> None:
+        """Background task: translate `thinking` and edit the already-sent
+        bubbles (sent_ids) in place. Runs after the reply was delivered, so
+        a slow translator subprocess never delays the turn. None-translation
+        leaves the English bubbles untouched."""
+        start = time.monotonic()
         target = self._cfg.thinking_translate_to
-        if not target or not needs_translation(thinking, target):
-            return thinking
         cmd = default_translate_cmd(
             self._cfg.cc_path, self._cfg.thinking_translate_model,
             self._cfg.thinking_translate_system_prompt,
         )
-        translated = await translate(thinking, target, cmd)
-        return translated or thinking
+        translated = await translate(
+            thinking, target, cmd, timeout=self._cfg.thinking_translate_timeout
+        )
+        if translated is None:
+            return
+        new_bubbles = pack_for_tg(translated)
+        n = len(new_bubbles)
+        shared = min(len(sent_ids), n)
+        for i in range(shared):
+            prefix = "\U0001f4ad\n" if n == 1 else f"\U0001f4ad ({i + 1}/{n})\n"
+            html = _think_html(prefix, new_bubbles[i])
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=sent_ids[i], text=html, parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.warning("thinking edit failed (bubble %d/%d): %s", i + 1, n, e)
+        for extra_id in sent_ids[shared:]:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=extra_id)
+            except Exception as e:
+                logger.warning("thinking delete failed (message_id %s): %s", extra_id, e)
+        for i in range(shared, n):
+            prefix = f"\U0001f4ad ({i + 1}/{n})\n"
+            html = _think_html(prefix, new_bubbles[i])
+            try:
+                await bot.send_message(chat_id=chat_id, text=html, parse_mode="HTML")
+            except Exception as e:
+                logger.warning("thinking send failed (bubble %d/%d): %s", i + 1, n, e)
+        logger.info(
+            "thinking translated in place in %.1fs (%d -> %d bubble(s))",
+            time.monotonic() - start, len(sent_ids), n,
+        )
 
     async def _deliver_reply(
         self, bot: Bot, chat_id: int, response: str, thinking: str
@@ -1610,18 +1650,28 @@ class TgLoop:
         response = strip_html_comments(response)
 
         # Thinking bubble: send before the early-return so silent turns still show it.
+        # Sent from the ORIGINAL text immediately — translation (if configured)
+        # happens afterward as a background edit, never blocking the turn.
         if thinking and self._state.thinking_on:
-            thinking = await self._resolve_thinking_text(thinking)
             think_bubbles = pack_for_tg(thinking)
             n = len(think_bubbles)
+            sent_ids: list[int] = []
             for i, bubble_text in enumerate(think_bubbles, start=1):
                 prefix = "\U0001f4ad\n" if n == 1 else f"\U0001f4ad ({i}/{n})\n"
-                think_html = f"<tg-spoiler><blockquote expandable>{prefix}{gfm_to_tg_html(bubble_text)}</blockquote></tg-spoiler>"
+                think_html = _think_html(prefix, bubble_text)
                 try:
-                    await bot.send_message(chat_id=chat_id, text=think_html, parse_mode="HTML")
+                    msg = await bot.send_message(chat_id=chat_id, text=think_html, parse_mode="HTML")
+                    sent_ids.append(msg.message_id)
                 except Exception as e:
                     logger.warning("thinking send failed (bubble %d/%d): %s", i, n, e)
                     break
+            target = self._cfg.thinking_translate_to
+            if sent_ids and target and needs_translation(thinking, target):
+                task = asyncio.create_task(
+                    self._translate_thinking_in_place(bot, chat_id, sent_ids, thinking)
+                )
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
 
         if not response:
             return
