@@ -93,6 +93,20 @@ context_notify_step = 50000
 # Your wxid — run `python -m synapse_wx.ilink` to find it after QR login
 target_wxid = ""
 
+[android]
+# (wx) Second-instance relay backend for a real Android WeChat account
+# (AutoJs6 bridge). Replaces the iLink client — the bridge runs an HTTP
+# server the phone polls/pushes to instead of talking to iLink directly.
+# Requires SYNAPSE_WX_CONFIG_DIR pointed at a separate config dir when run
+# alongside a normal iLink instance.
+enabled = false
+listen = "0.0.0.0"
+port = 8791
+token = ""
+# Notification title allowlist (exact match). Empty = accept every inbound
+# notification, including WeChat system senders (微信团队, 微信支付).
+allow_chats = []
+
 [loop]
 poll_interval_sec = 1.0
 # Spacing between outbound reply bubbles (seconds).

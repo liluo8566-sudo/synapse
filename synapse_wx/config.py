@@ -114,6 +114,17 @@ class Config:
     qidu_signal_poll_interval: float = 5.0
     qidu_notebook_dir: str = ""
 
+    # Android relay backend ([android] section) — replaces the iLink client
+    # with an HTTP server the phone (AutoJs6) talks to. Empty token/disabled =
+    # normal iLink bridge.
+    android_enabled: bool = False
+    android_listen: str = "0.0.0.0"
+    android_port: int = 8791
+    android_token: str = ""
+    # Notification title allowlist. Empty = accept all (incl. 微信团队 /
+    # 微信支付 system notifications, which would otherwise start a turn).
+    android_allow_chats: list[str] = field(default_factory=list)
+
 
 def load_config(path: Path | None = None) -> Config:
     """Load config.toml; return defaults if absent or malformed."""
@@ -264,5 +275,20 @@ def load_config(path: Path | None = None) -> Config:
             val = qidu.get(fname)
             if isinstance(val, int) and val > 0:
                 setattr(cfg, f"qidu_{fname}", val)
+
+    android = data.get("android") or {}
+    if isinstance(android, dict):
+        if isinstance(android.get("enabled"), bool):
+            cfg.android_enabled = android["enabled"]
+        if isinstance(android.get("listen"), str) and android["listen"]:
+            cfg.android_listen = android["listen"]
+        port = android.get("port")
+        if isinstance(port, int) and not isinstance(port, bool) and port > 0:
+            cfg.android_port = port
+        if isinstance(android.get("token"), str):
+            cfg.android_token = android["token"]
+        allow_chats = android.get("allow_chats")
+        if isinstance(allow_chats, list):
+            cfg.android_allow_chats = [str(x) for x in allow_chats]
 
     return cfg

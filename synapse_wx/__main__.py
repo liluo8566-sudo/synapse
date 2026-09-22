@@ -15,6 +15,7 @@ from pathlib import Path
 from synapse_core import bridge_state_store, marrow_session
 from synapse_core.alerts import AlertSink
 from synapse_core.commands import handlers as cmd_handlers
+from .android import AndroidClient
 from .media import inbound as media_inbound
 from .media import outbound as media_outbound
 from synapse_core.commands import marrow_audit
@@ -68,16 +69,22 @@ WX_BUBBLE_FORMAT_PROMPT = (
 
 CHANNEL = "wx"
 CHANNEL_LABEL = "CC-WX"
-CONFIG_DIR = Path.home() / ".config" / "synapse-wx"
+CONFIG_DIR = Path(
+    os.environ.get("SYNAPSE_WX_CONFIG_DIR", "~/.config/synapse-wx")
+).expanduser()
 LOG_DIR = Path.home() / "Library" / "Logs"
 ALERTS_DIR = CONFIG_DIR / "alerts"
+MEDIA_DIR = CONFIG_DIR / "media"
 BRIDGE_STATE_PATH = CONFIG_DIR / "bridge_state.json"
 HEALTH_STATE_PATH = CONFIG_DIR / "health.json"
 LAST_ACTIVE_PATH = Path.home() / ".config" / "marrow" / "last_active.json"
 SESSION_STATE_PATH = CONFIG_DIR / "sessions.json"
 SESSION_MARKER_DIR = CONFIG_DIR / "markers"
 SESSION_AUDIT_LOG = CONFIG_DIR / "session_audit.log"
-CC_STDERR_LOG = LOG_DIR / "synapse-wx-cc-stderr.log"
+CC_STDERR_LOG = LOG_DIR / f"{CONFIG_DIR.name}-cc-stderr.log"
+BRIDGE_LOG_PATH = (
+    Path.home() / ".config" / "marrow" / "logs" / CONFIG_DIR.name / f"{CONFIG_DIR.name}.log"
+)
 
 
 def _acquire_singleton_lock(path: Path) -> int:
@@ -128,8 +135,8 @@ def _wrap_ilink_with_alert_hook(ilink: ILinkClient, alerts: AlertSink) -> None:
 
 
 def main() -> int:
-    configure_logging(Path.home() / ".config/marrow/logs/synapse-wx/synapse-wx.log")
-    cfg = load_config()
+    configure_logging(BRIDGE_LOG_PATH)
+    cfg = load_config(CONFIG_DIR / "config.toml")
     if cfg.ack_overrides:
         cmd_messages.load_overrides(cfg.ack_overrides)
     # /cwd presets: config wins over the SYNAPSE_CWD_PRESETS env fallback.
@@ -147,27 +154,40 @@ def main() -> int:
     media_inbound.set_inbound_alert_sink(alerts)
     media_outbound.set_outbound_alert_sink(alerts)
 
-    raw_poll_logger = (
-        RawPollLogger(cfg.raw_poll_log_until) if cfg.raw_poll_log_until else None
-    )
-    ilink = ILinkClient(
-        raw_poll_logger=raw_poll_logger,
-        quota_wait_sec=cfg.quota_wait_sec,
-    )
-    if raw_poll_logger is not None and raw_poll_logger.active():
+    if cfg.android_enabled:
+        ilink = AndroidClient(
+            listen=cfg.android_listen,
+            port=cfg.android_port,
+            token=cfg.android_token,
+            allow_chats=cfg.android_allow_chats or None,
+        )
         logger.info(
-            "raw poll logging ON until %s → %s",
-            cfg.raw_poll_log_until,
-            raw_poll_logger._path,
+            "android relay backend ON — listening on %s:%d",
+            cfg.android_listen,
+            cfg.android_port,
         )
-    _wrap_ilink_with_alert_hook(ilink, alerts)
-    if not ilink.is_logged_in:
-        print(
-            "iLink not logged in; run "
-            '`python -c "from synapse_wx.ilink import ILinkClient; ILinkClient().login()"`',
-            file=sys.stderr,
+    else:
+        raw_poll_logger = (
+            RawPollLogger(cfg.raw_poll_log_until) if cfg.raw_poll_log_until else None
         )
-        return 1
+        ilink = ILinkClient(
+            raw_poll_logger=raw_poll_logger,
+            quota_wait_sec=cfg.quota_wait_sec,
+        )
+        if raw_poll_logger is not None and raw_poll_logger.active():
+            logger.info(
+                "raw poll logging ON until %s → %s",
+                cfg.raw_poll_log_until,
+                raw_poll_logger._path,
+            )
+        _wrap_ilink_with_alert_hook(ilink, alerts)
+        if not ilink.is_logged_in:
+            print(
+                "iLink not logged in; run "
+                '`python -c "from synapse_wx.ilink import ILinkClient; ILinkClient().login()"`',
+                file=sys.stderr,
+            )
+            return 1
 
     gate = HealthGate(state_path=HEALTH_STATE_PATH)
     gate.boot()
@@ -266,6 +286,8 @@ def main() -> int:
         idle_loop=idle_loop,
         buffer=buffer,
         poll_interval_sec=cfg.poll_interval_sec,
+        alert_dir=ALERTS_DIR,
+        media_dir=MEDIA_DIR,
         alerts=alerts,
         cfg=cfg,
         record_session=lambda sid, model: marrow_session.record_session(
