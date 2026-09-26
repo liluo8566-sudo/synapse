@@ -29,7 +29,7 @@ from synapse_core.marrow_session import get_session_created_at, get_session_effo
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
-from synapse_core.providers.cc import ClaudeCodeProvider, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, POLL_EOF, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT
+from synapse_core.providers.cc import ClaudeCodeProvider, BRIDGE_DELIVERY_PROMPT, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, POLL_EOF, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT
 from synapse_core.providers.codex import CodexProvider, is_codex_model
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.state import BridgeState, remember_resolved_model
@@ -475,7 +475,7 @@ class TgLoop:
                 channel="tg",
                 effort_level=state.effort_level,
                 stderr_log=Path.home() / "Library/Logs/synapse-tg-codex-stderr.log",
-                system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT],
+                system_prompts=[BRIDGE_DELIVERY_PROMPT, QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT],
             )
         return ClaudeCodeProvider(
             model=state.model,
@@ -486,7 +486,7 @@ class TgLoop:
             marrow_bridge=cfg.marrow_bridge,
             effort_level=state.effort_level,
             stderr_log=Path.home() / "Library/Logs/synapse-tg-cc-stderr.log",
-            system_prompts=[QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT],
+            system_prompts=[BRIDGE_DELIVERY_PROMPT, QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT],
             system_prompt_files=cfg.system_prompt_files,
             idle_soft_s=cfg.idle_soft_s,
             idle_hard_s=cfg.idle_hard_s,

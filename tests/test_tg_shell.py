@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from synapse_core import shell_state
+from synapse_core.providers.cc import BRIDGE_DELIVERY_PROMPT, SILENCE_SYSTEM_PROMPT
 from synapse_core.sessionend.tracker import SessionTracker
 from synapse_tg.config import TgConfig, load_config
 from synapse_tg.loop import TgLoop
@@ -1438,6 +1439,17 @@ def test_shell_off_when_tg_absent_from_marrow_shells(tmp_path):
 def test_shell_active_injects_the_shell_id(tmp_path):
     loop = TgLoop(_cfg(tmp_path))
     assert loop._make_provider().extra_env == {"MARROW_CORTEX": "tg"}
+
+
+def test_provider_system_prompts_include_bridge_delivery_and_silence(tmp_path):
+    """tg provider must carry both the delivery-contract prompt (say it as
+    text or it never reaches the user) and the silence protocol (comment-only
+    reply = intentional silence) — they are complementary, not exclusive."""
+    loop = TgLoop(_cfg(tmp_path))
+    prompts = loop._make_provider().system_prompts
+    assert BRIDGE_DELIVERY_PROMPT in prompts
+    assert SILENCE_SYSTEM_PROMPT in prompts
+    assert prompts.index(BRIDGE_DELIVERY_PROMPT) < prompts.index(SILENCE_SYSTEM_PROMPT)
 
 
 def test_shell_after_turn_is_a_noop_without_a_host(tmp_path):

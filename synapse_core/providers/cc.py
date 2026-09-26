@@ -125,6 +125,20 @@ MEDIA_SYSTEM_PROMPT = (
     "Desc format for ingest: emotion/scene | image text | one-line visual (CN preferred)."
 )
 
+# Bridge delivery contract: only text blocks reach the user. Counters the
+# CLI's own "don't restate text between tool calls" instinct, which on a
+# bridge channel means the reply never gets sent (e.g. prose written to a
+# file, turn ends with only a comment).
+BRIDGE_DELIVERY_PROMPT = (
+    "For tg & wx channels, every text block you write is delivered via the bridge - "
+    "do not restate text between tool calls in a final message. "
+    "Only text blocks reach the user: thinking, tool calls, and anything you write "
+    "into files (handoff, diary, logs) are never delivered. If you mean to say "
+    "something to the user this turn, write it as text, not only as thinking or a file. "
+    "A comment-only reply means deliberate silence - use it only when you truly "
+    "choose not to speak."
+)
+
 # HTML-comment silence protocol: the bridge strips all <!-- ... --> from replies
 # before sending. A reply consisting solely of comments sends nothing at all.
 SILENCE_SYSTEM_PROMPT = (
