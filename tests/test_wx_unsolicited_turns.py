@@ -14,6 +14,7 @@ import pytest
 
 from synapse_core.debounce import InboundBuffer
 from synapse_core.providers.cc import LOST_TEXT_RESEND_PROMPT
+from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.sessionend.tracker import SessionTracker
 from synapse_core.state import BridgeState
 from synapse_wx.config import Config
@@ -53,9 +54,16 @@ class ScriptedProvider:
     mirrors how the real ClaudeCodeProvider.recv() resets the flag at the
     start of a call and leaves its final value in place once the turn ends."""
 
-    def __init__(self, turns: list[list[dict]], *, lost_text: list[bool] | None = None) -> None:
+    def __init__(
+        self,
+        turns: list[list[dict]],
+        *,
+        lost_text: list[bool] | None = None,
+        send_raises: Exception | None = None,
+    ) -> None:
         self._turns = list(turns)
         self._lost_text = list(lost_text) if lost_text is not None else None
+        self._send_raises = send_raises
         self.alive = True
         self.session_id = None
         self.turn_output_capped = False
@@ -73,6 +81,8 @@ class ScriptedProvider:
             self.turn_lost_text = self._lost_text.pop(0)
 
     def send(self, msg):
+        if self._send_raises is not None:
+            raise self._send_raises
         self.sent.append(msg)
         return None
 
@@ -266,3 +276,18 @@ def test_lost_text_resend_also_lost_writes_alert_no_second_resend(tmp_path):
     failed = [a for a in alerts.written if a["kind"] == "lost_text_resend_failed"]
     assert len(failed) == 1
     assert failed[0]["fingerprint"] == "bridge.lost_text_resend_failed"
+
+
+def test_resend_provider_death_keeps_original_text(tmp_path):
+    """provider.send raises ProviderDeadError during the resend (provider
+    died/stalled between turns) — the original turn's already-collected text
+    must still be returned; no exception escapes _collect_turn."""
+    loop = _loop(tmp_path)
+    provider = ScriptedProvider(
+        [_turn("original reply")],
+        lost_text=[True],
+        send_raises=ProviderDeadError("dead between turns"),
+    )
+    loop._provider = provider
+    text = loop._drain_recv()
+    assert text == "original reply"

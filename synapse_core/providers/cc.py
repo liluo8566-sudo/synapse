@@ -95,6 +95,8 @@ def is_turn_event(ev: dict) -> bool:
         ev.get("type") in ("stream_event", "assistant", "user", "result")
         and ev.get("parent_tool_use_id") is None
     )
+
+
 # E-polish outbound quote v3: teach cc the bridge-specific <quote> protocol.
 # Injected once per session via --append-system-prompt so cc emits the tag
 # at bubble-heads when it intends to quote-reply, and never as filler text.

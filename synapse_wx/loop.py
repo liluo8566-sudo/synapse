@@ -1073,27 +1073,35 @@ class MainLoop:
             and getattr(self._provider, "turn_lost_text", False)
             and not getattr(self._provider, "turn_output_capped", False)
         ):
-            logger.warning(
-                "turn wrote user-facing words into thinking — asking for a resend"
-            )
-            self._provider.send(LOST_TEXT_RESEND_PROMPT)
-            rec = self._collect_turn(resend_lost=False)
-            if getattr(self._provider, "turn_lost_text", False) and self._alerts is not None:
-                try:
-                    self._alerts.write(
-                        "warn",
-                        "lost_text_resend_failed",
-                        "resend after a thinking-only reply also lost text to "
-                        "thinking — giving up after one retry",
-                        source="loop.collect_turn",
-                        fingerprint="bridge.lost_text_resend_failed",
-                    )
-                except Exception as ae:
-                    logger.warning("alerts.write failed: %s", ae)
-            if rec is not None:
-                rec_text, rec_thinking, _rec_unsolicited = rec
-                text = "\n\n".join(part for part in (text, rec_text) if part)
-                thinking = "\n\n".join(part for part in (thinking, rec_thinking) if part)
+            # The original turn's text/thinking above must ship regardless —
+            # if the provider dies or stalls mid-resend (send/recv raise
+            # ProviderDeadError/ProviderStallError), fall through and return
+            # what was already collected instead of losing it too. The dead
+            # provider is picked up lazily on the next send either way.
+            try:
+                logger.warning(
+                    "turn wrote user-facing words into thinking — asking for a resend"
+                )
+                self._provider.send(LOST_TEXT_RESEND_PROMPT)
+                rec = self._collect_turn(resend_lost=False)
+                if getattr(self._provider, "turn_lost_text", False) and self._alerts is not None:
+                    try:
+                        self._alerts.write(
+                            "warn",
+                            "lost_text_resend_failed",
+                            "resend after a thinking-only reply also lost text to "
+                            "thinking — giving up after one retry",
+                            source="loop.collect_turn",
+                            fingerprint="bridge.lost_text_resend_failed",
+                        )
+                    except Exception as ae:
+                        logger.warning("alerts.write failed: %s", ae)
+                if rec is not None:
+                    rec_text, rec_thinking, _rec_unsolicited = rec
+                    text = "\n\n".join(part for part in (text, rec_text) if part)
+                    thinking = "\n\n".join(part for part in (thinking, rec_thinking) if part)
+            except Exception as e:
+                logger.warning("lost-text resend failed: %s", e)
         return text, thinking, unsolicited
 
     def _drain_recv(self) -> str:
@@ -1275,11 +1283,11 @@ class MainLoop:
         poll_line returns already-parsed dicts (the reader thread pre-parses
         JSON), so no strip/json.loads is needed here.
 
-        Every cc spawn (fresh or --resume) emits a system{init} handshake as
-        its first event; it is consumed here for its session-id state. Any
-        other first event that only occurs inside a main-thread turn
-        (task_notification, or a main-thread stream_event / assistant / user /
-        result) opens collection instead."""
+        A system{init} frame (each turn's first frame in current cc; a
+        bare-spawn handshake in older cc) is consumed here for its session-id
+        state. Any other first event that only occurs inside a main-thread
+        turn (task_notification, or a main-thread stream_event / assistant /
+        user / result) opens collection instead."""
         ev = line  # poll_line already returns a parsed dict
         if not isinstance(ev, dict):
             logger.warning("idle listener: skip non-object event: %s", repr(ev)[:120])
