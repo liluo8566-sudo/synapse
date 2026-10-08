@@ -190,3 +190,24 @@ def test_storm_cap_config_override(tmp_path):
     p.write_text("[provider]\nunsolicited_storm_cap = 3\n")
     cfg = load_config(p)
     assert cfg.unsolicited_storm_cap == 3
+
+
+# ── subagent events never reach the user ──────────────────────────────────────
+
+def test_subagent_text_excluded_from_collected_turn(tmp_path):
+    """A subagent's assistant text (parent_tool_use_id set) interleaved into
+    the main turn's stream must never reach the delivered text."""
+    loop = _loop(tmp_path)
+    turn = [
+        {"type": "system", "subtype": "init", "session_id": "sid-x"},
+        {"type": "assistant", "parent_tool_use_id": "toolu_task",
+         "message": {"content": [{"type": "text", "text": "subagent chatter"}],
+                      "usage": {"output_tokens": 1}}},
+        {"type": "assistant", "parent_tool_use_id": None,
+         "message": {"content": [{"type": "text", "text": "final reply"}],
+                      "usage": {"output_tokens": 1}}},
+        {"type": "result", "result": "final reply"},
+    ]
+    loop._provider = ScriptedProvider([turn])
+    text = loop._drain_recv()
+    assert text == "final reply"

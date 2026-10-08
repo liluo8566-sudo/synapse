@@ -26,7 +26,7 @@ from synapse_core.debounce import InboundBuffer
 from .media.inbound import build_read_tool_instruction, materialize
 from .media.outbound import dispatch_media_bubble
 from synapse_core.providers.base import Provider
-from synapse_core.providers.cc import POLL_EOF
+from synapse_core.providers.cc import POLL_EOF, is_turn_event
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.sessionend.idle import IdleFireLoop
 from synapse_core.sessionend.tracker import SessionTracker
@@ -1000,6 +1000,10 @@ class MainLoop:
         listener already pulled off the queue; recv processes it before reading
         further. A turn whose FIRST event is system/task_notification is
         unsolicited (a background-task completion the CLI ran with no stdin).
+
+        Subagent-attributed events (`parent_tool_use_id` set) skip
+        _collect_assistant entirely — their text never reaches the user (usage
+        accounting for those events is skipped along with it).
         """
         assert self._provider is not None
         text_chunks: list[str] = []
@@ -1022,7 +1026,8 @@ class MainLoop:
             if t == "system" and ev.get("subtype") == "init":
                 self._apply_init_event(ev)
             elif t == "assistant":
-                self._collect_assistant(ev, text_chunks, thinking_chunks)
+                if ev.get("parent_tool_use_id") is None:
+                    self._collect_assistant(ev, text_chunks, thinking_chunks)
             elif t == "stream_event":
                 # cc --include-partial-messages forwards SSE deltas as
                 # `stream_event` frames. Under OAuth the final assistant
@@ -1234,16 +1239,15 @@ class MainLoop:
         JSON), so no strip/json.loads is needed here.
 
         Every cc spawn (fresh or --resume) emits a system{init} handshake as
-        its first event. It carries no result event, so feeding it to
-        _collect_turn blocks recv until idle_hard_s and then SIGKILLs the fresh
-        process — while typing pings the chat the whole time. Handle the
-        handshake's state here instead; only a task_notification-first event is
-        a real unsolicited turn."""
+        its first event; it is consumed here for its session-id state. Any
+        other first event that only occurs inside a main-thread turn
+        (task_notification, or a main-thread stream_event / assistant / user /
+        result) opens collection instead."""
         ev = line  # poll_line already returns a parsed dict
         if not isinstance(ev, dict):
             logger.warning("idle listener: skip non-object event: %s", repr(ev)[:120])
             return True
-        if _is_unsolicited_first_event(ev):
+        if _is_unsolicited_first_event(ev) or is_turn_event(ev):
             return False
         if ev.get("type") == "system" and ev.get("subtype") == "init":
             self._apply_init_event(ev)

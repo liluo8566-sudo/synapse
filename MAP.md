@@ -63,7 +63,7 @@ Runtimes: bridge (launchd, single process) · cc subprocess (persistent, swap = 
 
 ## 5. Resident listener (unsolicited turns)
 
-- Turn classification: first event `system(task_notification)` = unsolicited turn (notification frame yields no text); consecutive unsolicited turns possible (multiple background agents).
+- Turn classification: `_consume_non_turn_line` opens a turn on `system(task_notification)` (unsolicited — notification frame yields no text) OR `is_turn_event` (a main-thread `stream_event`/`assistant`/`user`/`result`, i.e. a CLI-initiated turn with no task_notification preamble); consecutive unsolicited turns possible (multiple background agents). Everything else (init/status/background_tasks_changed/task_*, rate_limit_event, any event with `parent_tool_use_id` set) is consumed, never drained. Subagent events (`parent_tool_use_id` set) are excluded from `is_turn_event` and, inside a collected turn, never contribute text.
 - Provider (`synapse_core/providers/cc.py`): `poll_line(timeout)` — no liveness clock, `POLL_EOF` sentinel + `alive=False` on reader EOF; `recv(first_line=...)` processes a pre-read line before the queue.
 - Shared `_deliver_reply` — turn-aware stream/drain delivers unsolicited turns inline; solicited turn returned to flush as normal.
 - Resident idle listener: [tg] asyncio task under the flush `asyncio.Lock`, started post_init. [wx] daemon thread. Delivers background-task answers between turns; typing indicator runs during generation. Lazy respawn on EOF only — listener never respawns.

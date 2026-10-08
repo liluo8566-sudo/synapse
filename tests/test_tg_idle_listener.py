@@ -171,15 +171,23 @@ def test_init_handshake_does_not_start_typing_or_drain(tmp_path):
 
 
 def test_non_turn_first_event_consumed_not_drained(tmp_path):
-    """A stray non-task_notification event dict is consumed without typing or
-    draining. Non-dict values (defensive check) also consumed with a warning."""
+    """Genuinely out-of-band events (a background_tasks_changed system frame,
+    a subagent stream_event) are consumed without typing or draining. Non-dict
+    values (defensive check) also consumed with a warning. A bare main-thread
+    stream_event is now a turn event (is_turn_event) — covered separately in
+    test_cli_initiated_turn_while_idle_is_collected_and_delivered."""
     loop = _loop(tmp_path)
     bot = FakeBot()
     loop._bot = bot
     loop._pending_chat_id = 123
     loop._provider = NoRecvProvider(
-        [42, {"type": "stream_event"}]  # non-dict + stray event dict
+        [
+            42,  # non-dict
+            {"type": "system", "subtype": "background_tasks_changed"},
+            {"type": "stream_event", "parent_tool_use_id": "toolu_x"},
+        ]
     )
+    asyncio.run(loop._listen_once())
     asyncio.run(loop._listen_once())
     asyncio.run(loop._listen_once())
     assert bot.typing == 0
@@ -201,6 +209,49 @@ def test_handshake_before_unsolicited_turn_still_delivers(tmp_path):
     asyncio.run(loop._listen_once())  # now the real turn
     assert [m["text"] for m in bot.sent] == ["bg answer"]
     assert bot.typing >= 1
+
+
+def test_cli_initiated_turn_while_idle_is_collected_and_delivered(tmp_path):
+    """Bug B: a turn the CLI starts by itself (no task_notification preamble)
+    opens with system/init, system/status, then main-thread stream_event /
+    assistant / ... / result. Before the fix, _consume_non_turn_line only
+    opened a turn on task_notification, so this whole turn (and its text) was
+    silently dropped one event at a time."""
+    loop = _loop(tmp_path)
+    bot = FakeBot()
+    loop._bot = bot
+    loop._pending_chat_id = 123
+    lines = [
+        {"type": "system", "subtype": "init", "session_id": "sid-x"},
+        {"type": "system", "subtype": "status"},
+        {"type": "stream_event", "parent_tool_use_id": None},
+        {"type": "assistant", "parent_tool_use_id": None,
+         "message": {"content": [{"type": "text", "text": "hello"}]}},
+        {"type": "result", "result": "hello"},
+    ]
+    loop._provider = QueueProvider(lines)
+    asyncio.run(loop._listen_once())  # consumes init
+    asyncio.run(loop._listen_once())  # consumes status (dropped, logged)
+    assert bot.sent == []
+    asyncio.run(loop._listen_once())  # stream_event opens the turn, collects it
+    assert [m["text"] for m in bot.sent] == ["hello"]
+
+
+def test_subagent_event_while_idle_is_consumed_not_drained(tmp_path):
+    """A subagent's own assistant event (parent_tool_use_id set) streaming
+    while the main thread is idle must be consumed like any other out-of-band
+    event, never opened as a turn."""
+    loop = _loop(tmp_path)
+    bot = FakeBot()
+    loop._bot = bot
+    loop._pending_chat_id = 123
+    loop._provider = NoRecvProvider(
+        [{"type": "assistant", "parent_tool_use_id": "toolu_x",
+          "message": {"content": [{"type": "text", "text": "subagent chatter"}]}}]
+    )
+    asyncio.run(loop._listen_once())
+    assert bot.typing == 0
+    assert bot.sent == []
 
 
 def test_idle_none_poll_is_noop(tmp_path):

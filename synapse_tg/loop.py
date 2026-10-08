@@ -29,7 +29,7 @@ from synapse_core.marrow_session import get_session_created_at, get_session_effo
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
-from synapse_core.providers.cc import ClaudeCodeProvider, BRIDGE_DELIVERY_PROMPT, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, POLL_EOF, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT
+from synapse_core.providers.cc import ClaudeCodeProvider, BRIDGE_DELIVERY_PROMPT, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, POLL_EOF, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT, is_turn_event
 from synapse_core.providers.codex import CodexProvider, is_codex_model
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.state import BridgeState, remember_resolved_model
@@ -632,6 +632,9 @@ class TgLoop:
         queue that opened this turn; recv processes it before the queue.
         `bot`/`chat_id` (when known) let a lie_down(rotate=False) or transfer
         tool_use queue its receipt for the end of the reply cycle.
+
+        Subagent-attributed events (`parent_tool_use_id` set) are drained for
+        usage only — their text/tool_use never reaches the user.
         """
         assert self._provider is not None
         q: queue.Queue = queue.Queue()
@@ -671,29 +674,32 @@ class TgLoop:
                 continue
             if t_type == "assistant":
                 msg = ev.get("message") or {}
-                for block in msg.get("content", []):
-                    bt = block.get("type")
-                    if bt == "text":
-                        chunk = strip_tool_xml(block.get("text", ""))
-                        if chunk:
-                            text_chunks.append(chunk)
-                    elif bt == "tool_use":
-                        if not typing.running:
-                            typing.start()
-                        name = block.get("name") or ""
-                        if name.endswith("lie_down"):
-                            tool_input = block.get("input") or {}
-                            if not tool_input.get("rotate"):
-                                self._queue_lie_down(bot, chat_id, tool_input)
-                        elif name.endswith("transfer"):
-                            self._queue_transfer(bot, chat_id, block.get("input") or {})
-                    elif bt == "thinking":
-                        # cc fills BOTH the stream_event thinking_delta path
-                        # and this final-frame thinking block with the same
-                        # plaintext under --include-partial-messages. Reading
-                        # both would duplicate the 🧠 bubble; stream_event is
-                        # the source of truth — skip here.
-                        pass
+                if ev.get("parent_tool_use_id") is None:
+                    for block in msg.get("content", []):
+                        bt = block.get("type")
+                        if bt == "text":
+                            chunk = strip_tool_xml(block.get("text", ""))
+                            if chunk:
+                                text_chunks.append(chunk)
+                        elif bt == "tool_use":
+                            if not typing.running:
+                                typing.start()
+                            name = block.get("name") or ""
+                            if name.endswith("lie_down"):
+                                tool_input = block.get("input") or {}
+                                if not tool_input.get("rotate"):
+                                    self._queue_lie_down(bot, chat_id, tool_input)
+                            elif name.endswith("transfer"):
+                                self._queue_transfer(bot, chat_id, block.get("input") or {})
+                        elif bt == "thinking":
+                            # cc fills BOTH the stream_event thinking_delta path
+                            # and this final-frame thinking block with the same
+                            # plaintext under --include-partial-messages. Reading
+                            # both would duplicate the 🧠 bubble; stream_event is
+                            # the source of truth — skip here.
+                            pass
+                # Subagent text/tool_use is skipped above (never reaches the
+                # user); usage still counts toward /info regardless of origin.
                 usage = msg.get("usage")
                 if isinstance(usage, dict):
                     self._merge_usage(usage)
@@ -794,16 +800,15 @@ class TgLoop:
         JSON), so no strip/json.loads is needed here.
 
         Every cc spawn (fresh or --resume, e.g. shell_respawn / /model) emits a
-        system{init} handshake as its first event. It carries no result event,
-        so feeding it to _collect_turn blocks recv until idle_hard_s and then
-        SIGKILLs the fresh process — while typing runs the whole time. Handle
-        the handshake's state here instead; only a task_notification-first event
-        is a real unsolicited turn."""
+        system{init} handshake as its first event; it is consumed here for its
+        session-id state. Any other first event that only occurs inside a
+        main-thread turn (task_notification, or a main-thread stream_event /
+        assistant / user / result) opens collection instead."""
         ev = line  # poll_line already returns a parsed dict
         if not isinstance(ev, dict):
             logger.warning("idle listener: skip non-object event: %s", repr(ev)[:120])
             return True
-        if _is_unsolicited_first_event(ev):
+        if _is_unsolicited_first_event(ev) or is_turn_event(ev):
             return False
         if ev.get("type") == "system" and ev.get("subtype") == "init":
             self._handle_init_event(ev)

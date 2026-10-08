@@ -85,6 +85,16 @@ _DEFAULT_TURN_OUTPUT_CAP = 20000
 # poll_line sentinel: the reader thread put None (EOF) while the caller was
 # polling idle. Distinct from None (no event within timeout).
 POLL_EOF = object()
+
+
+def is_turn_event(ev: dict) -> bool:
+    """True iff seeing this event while idle means a CLI-initiated turn is in
+    flight and must be collected to its result (these event types only occur
+    inside a main-thread turn)."""
+    return (
+        ev.get("type") in ("stream_event", "assistant", "user", "result")
+        and ev.get("parent_tool_use_id") is None
+    )
 # E-polish outbound quote v3: teach cc the bridge-specific <quote> protocol.
 # Injected once per session via --append-system-prompt so cc emits the tag
 # at bubble-heads when it intends to quote-reply, and never as filler text.

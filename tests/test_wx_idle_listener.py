@@ -190,18 +190,23 @@ def test_init_handshake_does_not_start_typing_or_drain(tmp_path):
 
 
 def test_non_turn_first_event_consumed_not_drained(tmp_path):
-    """A stray non-task_notification event dict (e.g. stream_event, a non-dict)
-    is consumed without typing or draining.
+    """Genuinely out-of-band events (a background_tasks_changed system frame,
+    a subagent stream_event) are consumed without typing or draining. A bare
+    main-thread stream_event is now a turn event (is_turn_event) — covered
+    separately in test_cli_initiated_turn_while_idle_is_collected_and_delivered.
 
     Note: raw strings can no longer arrive via poll_line — the reader thread
     pre-parses JSON and skips bad lines before enqueueing. Only dicts reach here.
     The non-dict guard in _consume_non_turn_line is a defensive belt-and-braces
     check for future misuse, tested with a synthetic non-dict sentinel."""
     loop = _loop(tmp_path)
-    # A non-dict value (defensive check) and a stray stream_event dict.
-    prov = NoRecvProvider([42,  # non-dict: should be consumed with a warning
-                           {"type": "stream_event"}])
+    prov = NoRecvProvider([
+        42,  # non-dict: should be consumed with a warning
+        {"type": "system", "subtype": "background_tasks_changed"},
+        {"type": "stream_event", "parent_tool_use_id": "toolu_x"},
+    ])
     loop._provider = prov
+    loop._listen_once()
     loop._listen_once()
     loop._listen_once()
     assert loop._ilink.typing == 0
@@ -219,6 +224,43 @@ def test_handshake_before_unsolicited_turn_still_delivers(tmp_path):
     loop._listen_once()  # now the real turn
     assert [s[2] for s in loop._ilink.sent] == ["bg answer"]
     assert loop._ilink.typing >= 1
+
+
+def test_cli_initiated_turn_while_idle_is_collected_and_delivered(tmp_path):
+    """Bug B: a turn the CLI starts by itself (no task_notification preamble)
+    opens with system/init, system/status, then main-thread stream_event /
+    assistant / ... / result. Before the fix, _consume_non_turn_line only
+    opened a turn on task_notification, so this whole turn (and its text) was
+    silently dropped one event at a time."""
+    loop = _loop(tmp_path)
+    lines = [
+        {"type": "system", "subtype": "init", "session_id": "sid-x"},
+        {"type": "system", "subtype": "status"},
+        {"type": "stream_event", "parent_tool_use_id": None},
+        {"type": "assistant", "parent_tool_use_id": None,
+         "message": {"content": [{"type": "text", "text": "hello"}]}},
+        {"type": "result", "result": "hello"},
+    ]
+    loop._provider = QueueProvider(lines)
+    loop._listen_once()  # consumes init
+    loop._listen_once()  # consumes status (dropped, logged)
+    assert loop._ilink.sent == []
+    loop._listen_once()  # stream_event opens the turn, collects it
+    assert [s[2] for s in loop._ilink.sent] == ["hello"]
+
+
+def test_subagent_event_while_idle_is_consumed_not_drained(tmp_path):
+    """A subagent's own assistant event (parent_tool_use_id set) streaming
+    while the main thread is idle must be consumed like any other out-of-band
+    event, never opened as a turn."""
+    loop = _loop(tmp_path)
+    loop._provider = NoRecvProvider(
+        [{"type": "assistant", "parent_tool_use_id": "toolu_x",
+          "message": {"content": [{"type": "text", "text": "subagent chatter"}]}}]
+    )
+    loop._listen_once()
+    assert loop._ilink.typing == 0
+    assert loop._ilink.sent == []
 
 
 def test_idle_none_poll_is_noop(tmp_path):

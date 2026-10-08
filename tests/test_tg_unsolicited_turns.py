@@ -225,6 +225,28 @@ def test_storm_cap_config_override(tmp_path):
     assert cfg.unsolicited_storm_cap == 3
 
 
+# ── subagent events never reach the user ──────────────────────────────────────
+
+def test_subagent_text_excluded_from_collected_turn(tmp_path, monkeypatch):
+    """A subagent's assistant text (parent_tool_use_id set) interleaved into
+    the main turn's stream must never reach the delivered text."""
+    loop = _loop(tmp_path)
+    bot = FakeBot()
+    turn = [
+        {"type": "system", "subtype": "init", "session_id": "sid-x"},
+        {"type": "assistant", "parent_tool_use_id": "toolu_task",
+         "message": {"content": [{"type": "text", "text": "subagent chatter"}],
+                      "usage": {"output_tokens": 1}}},
+        {"type": "assistant", "parent_tool_use_id": None,
+         "message": {"content": [{"type": "text", "text": "final reply"}],
+                      "usage": {"output_tokens": 1}}},
+        {"type": "result", "result": "final reply"},
+    ]
+    provider = ScriptedProvider([turn])
+    text, _thinking = _stream(loop, bot, provider, monkeypatch)
+    assert text == "final reply"
+
+
 # ── shell receipts (💤 / 🌙 / 🔄): queued during the turn, shipped after it ────
 
 class _FixedClock:
