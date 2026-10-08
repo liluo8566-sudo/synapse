@@ -29,7 +29,7 @@ from synapse_core.marrow_session import get_session_created_at, get_session_effo
 from synapse_core.commands import messages
 from synapse_core.commands.registry import CommandContext, Registry
 from synapse_core.debounce import InboundBuffer
-from synapse_core.providers.cc import ClaudeCodeProvider, BRIDGE_DELIVERY_PROMPT, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, POLL_EOF, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT, is_turn_event
+from synapse_core.providers.cc import ClaudeCodeProvider, BRIDGE_DELIVERY_PROMPT, LOST_TEXT_RESEND_PROMPT, MEDIA_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, POLL_EOF, QUOTE_SYSTEM_PROMPT, SILENCE_SYSTEM_PROMPT, is_turn_event
 from synapse_core.providers.codex import CodexProvider, is_codex_model
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.state import BridgeState, remember_resolved_model
@@ -623,6 +623,7 @@ class TgLoop:
     async def _collect_turn(
         self, typing: TypingAction, first_line: str | None = None,
         bot: Bot | None = None, chat_id: int | None = None,
+        resend: bool = True,
     ) -> tuple[str, str, bool] | None:
         """Drain ONE turn from the provider. Returns (text, thinking,
         unsolicited) or None when the recv thread ended before any turn
@@ -631,10 +632,17 @@ class TgLoop:
         `first_line` is a raw line the idle listener already pulled off the
         queue that opened this turn; recv processes it before the queue.
         `bot`/`chat_id` (when known) let a lie_down(rotate=False) or transfer
-        tool_use queue its receipt for the end of the reply cycle.
+        tool_use queue its receipt for the end of the reply cycle; they also
+        gate the lost-text resend below (no target to resend into = skip it).
 
         Subagent-attributed events (`parent_tool_use_id` set) are drained for
         usage only — their text/tool_use never reaches the user.
+
+        `resend` (default True): if the provider flags `turn_lost_text` (the
+        reply was written into thinking instead of text — see
+        LOST_TEXT_RESEND_PROMPT), ask it once to resend as text and merge the
+        result into this turn. Passed False on the recursive resend call
+        itself so at most one resend ever happens per turn.
         """
         assert self._provider is not None
         q: queue.Queue = queue.Queue()
@@ -727,7 +735,39 @@ class TgLoop:
             # Thread ended with no events at all (clean EOF between turns).
             return None
         self._death_count = 0
-        return "\n\n".join(text_chunks), "".join(thinking_chunks), unsolicited
+        text = "\n\n".join(text_chunks)
+        thinking = "".join(thinking_chunks)
+        if (
+            resend
+            and bot is not None
+            and chat_id is not None
+            and getattr(self._provider, "turn_lost_text", False)
+            and not getattr(self._provider, "turn_output_capped", False)
+        ):
+            logger.warning(
+                "turn wrote user-facing words into thinking — asking for a resend"
+            )
+            await asyncio.to_thread(self._provider.send, LOST_TEXT_RESEND_PROMPT)
+            rec = await self._collect_turn(
+                typing, bot=bot, chat_id=chat_id, resend=False
+            )
+            if getattr(self._provider, "turn_lost_text", False) and self._alerts is not None:
+                try:
+                    self._alerts.write(
+                        "warn",
+                        "lost_text_resend_failed",
+                        "resend after a thinking-only reply also lost text to "
+                        "thinking — giving up after one retry",
+                        source="loop.collect_turn",
+                        fingerprint="bridge.lost_text_resend_failed",
+                    )
+                except Exception as ae:
+                    logger.warning("alerts.write failed: %s", ae)
+            if rec is not None:
+                rec_text, rec_thinking, _rec_unsolicited = rec
+                text = "\n\n".join(part for part in (text, rec_text) if part)
+                thinking = "\n\n".join(part for part in (thinking, rec_thinking) if part)
+        return text, thinking, unsolicited
 
     async def _stream_response(
         self, bot: Bot, chat_id: int, typing: TypingAction

@@ -26,7 +26,7 @@ from synapse_core.debounce import InboundBuffer
 from .media.inbound import build_read_tool_instruction, materialize
 from .media.outbound import dispatch_media_bubble
 from synapse_core.providers.base import Provider
-from synapse_core.providers.cc import POLL_EOF, is_turn_event
+from synapse_core.providers.cc import LOST_TEXT_RESEND_PROMPT, POLL_EOF, is_turn_event
 from synapse_core.providers.errors import ProviderDeadError
 from synapse_core.sessionend.idle import IdleFireLoop
 from synapse_core.sessionend.tracker import SessionTracker
@@ -991,7 +991,7 @@ class MainLoop:
             logger.warning("persist_state failed: %s", e)
 
     def _collect_turn(
-        self, first_line: str | None = None
+        self, first_line: str | None = None, *, resend_lost: bool = True
     ) -> tuple[str, str, bool] | None:
         """Drain ONE provider turn; mirror events into BridgeState.
 
@@ -1004,6 +1004,14 @@ class MainLoop:
         Subagent-attributed events (`parent_tool_use_id` set) skip
         _collect_assistant entirely — their text never reaches the user (usage
         accounting for those events is skipped along with it).
+
+        `resend_lost` (default True): if the provider flags `turn_lost_text`
+        (the reply was written into thinking instead of text — see
+        LOST_TEXT_RESEND_PROMPT), ask it once to resend as text and merge the
+        result into this turn. Pass False (as the idle no-target path does)
+        to skip this — e.g. when there is nowhere to deliver the resend
+        regardless. False also on the recursive resend call itself so at most
+        one resend ever happens per turn.
         """
         assert self._provider is not None
         text_chunks: list[str] = []
@@ -1058,7 +1066,35 @@ class MainLoop:
         prov_usage = getattr(self._provider, "usage_total", None)
         if isinstance(prov_usage, dict) and prov_usage:
             self.state.usage_total = dict(prov_usage)
-        return "".join(text_chunks), "".join(thinking_chunks).strip(), unsolicited
+        text = "".join(text_chunks)
+        thinking = "".join(thinking_chunks).strip()
+        if (
+            resend_lost
+            and getattr(self._provider, "turn_lost_text", False)
+            and not getattr(self._provider, "turn_output_capped", False)
+        ):
+            logger.warning(
+                "turn wrote user-facing words into thinking — asking for a resend"
+            )
+            self._provider.send(LOST_TEXT_RESEND_PROMPT)
+            rec = self._collect_turn(resend_lost=False)
+            if getattr(self._provider, "turn_lost_text", False) and self._alerts is not None:
+                try:
+                    self._alerts.write(
+                        "warn",
+                        "lost_text_resend_failed",
+                        "resend after a thinking-only reply also lost text to "
+                        "thinking — giving up after one retry",
+                        source="loop.collect_turn",
+                        fingerprint="bridge.lost_text_resend_failed",
+                    )
+                except Exception as ae:
+                    logger.warning("alerts.write failed: %s", ae)
+            if rec is not None:
+                rec_text, rec_thinking, _rec_unsolicited = rec
+                text = "\n\n".join(part for part in (text, rec_text) if part)
+                thinking = "\n\n".join(part for part in (thinking, rec_thinking) if part)
+        return text, thinking, unsolicited
 
     def _drain_recv(self) -> str:
         """Drain provider turns until the first solicited reply turn.
@@ -1213,8 +1249,9 @@ class MainLoop:
                 logger.warning(
                     "idle listener: unsolicited turn with no chat target — dropped"
                 )
-                # Still drain the turn so it doesn't rot in the queue.
-                self._collect_turn(first_line=line)
+                # Still drain the turn so it doesn't rot in the queue. No chat
+                # target to resend into either, so skip that too.
+                self._collect_turn(first_line=line, resend_lost=False)
                 return
             self._listen_typing = TypingPing(
                 self._ilink, from_wxid, ctx_token, interval=5.0

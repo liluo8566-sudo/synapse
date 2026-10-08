@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from synapse_core.debounce import InboundBuffer
+from synapse_core.providers.cc import LOST_TEXT_RESEND_PROMPT
 from synapse_tg.config import TgConfig
 from synapse_tg.loop import TgLoop
 
@@ -42,21 +43,33 @@ class FakeBot:
 
 class ScriptedProvider:
     """recv() yields the events of ONE turn per call, walking a script of
-    turns. Each turn is a list of dict events ending in a result."""
+    turns. Each turn is a list of dict events ending in a result.
 
-    def __init__(self, turns: list[list[dict]]) -> None:
+    Optional `lost_text`: a list of booleans, one per scripted turn, applied
+    to `self.turn_lost_text` right after that turn's events are exhausted —
+    mirrors how the real ClaudeCodeProvider.recv() resets the flag at the
+    start of a call and leaves its final value in place once the turn ends."""
+
+    def __init__(self, turns: list[list[dict]], *, lost_text: list[bool] | None = None) -> None:
         self._turns = list(turns)
+        self._lost_text = list(lost_text) if lost_text is not None else None
         self.alive = True
         self.session_id = None
         self.turn_output_capped = False
+        self.turn_lost_text = False
+        self.sent: list[str] = []
 
     def recv(self, first_line=None):
+        self.turn_lost_text = False
         if not self._turns:
             return
         for ev in self._turns.pop(0):
             yield ev
+        if self._lost_text:
+            self.turn_lost_text = self._lost_text.pop(0)
 
     def send(self, msg):
+        self.sent.append(msg)
         return None
 
     def is_alive(self):
@@ -245,6 +258,48 @@ def test_subagent_text_excluded_from_collected_turn(tmp_path, monkeypatch):
     provider = ScriptedProvider([turn])
     text, _thinking = _stream(loop, bot, provider, monkeypatch)
     assert text == "final reply"
+
+
+# ── Bug A: reply written into thinking — resend as text ───────────────────────
+
+def test_lost_text_triggers_one_resend_merged_after_original(tmp_path, monkeypatch):
+    loop = _loop(tmp_path)
+    bot = FakeBot()
+    provider = ScriptedProvider(
+        [_turn("original reply"), _turn("resent reply")],
+        lost_text=[True, False],
+    )
+    text, _thinking = _stream(loop, bot, provider, monkeypatch)
+    assert provider.sent == [LOST_TEXT_RESEND_PROMPT]
+    assert text == "original reply\n\nresent reply"
+
+
+def test_lost_text_false_triggers_no_resend(tmp_path, monkeypatch):
+    loop = _loop(tmp_path)
+    bot = FakeBot()
+    provider = ScriptedProvider([_turn("just a reply")], lost_text=[False])
+    text, _thinking = _stream(loop, bot, provider, monkeypatch)
+    assert provider.sent == []
+    assert text == "just a reply"
+
+
+def test_lost_text_resend_also_lost_writes_alert_no_second_resend(tmp_path, monkeypatch):
+    """If the resend ALSO lands in thinking, give up after one retry and
+    write an alert instead of resending again."""
+    alerts = RecordingAlerts()
+    loop = _loop(tmp_path, alerts=alerts)
+    bot = FakeBot()
+    provider = ScriptedProvider(
+        [_turn("original reply"), _turn("resent but still lost")],
+        lost_text=[True, True],
+    )
+    text, _thinking = _stream(loop, bot, provider, monkeypatch)
+    # Exactly one resend — the recursive collect call passes resend=False.
+    assert provider.sent == [LOST_TEXT_RESEND_PROMPT]
+    assert text == "original reply\n\nresent but still lost"
+    failed = [a for a in alerts.written if a["kind"] == "lost_text_resend_failed"]
+    assert len(failed) == 1
+    assert failed[0]["fingerprint"] == "bridge.lost_text_resend_failed"
 
 
 # ── shell receipts (💤 / 🌙 / 🔄): queued during the turn, shipped after it ────

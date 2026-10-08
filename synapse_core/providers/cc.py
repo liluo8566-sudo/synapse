@@ -149,6 +149,18 @@ BRIDGE_DELIVERY_PROMPT = (
     "choose not to speak."
 )
 
+# Bridge resend: some models (claude-opus-5-5, claude-fable-5-1) occasionally
+# write the user-facing reply into a SECOND thinking block right before a tool
+# call instead of a text block, so the bridge never sees it (thinking reaches
+# the client only as a summary). Ask the model to resend it as plain text.
+LOST_TEXT_RESEND_PROMPT = (
+    "[bridge] In your last reply, words meant for the user were written inside a "
+    "thinking block right before a tool call, so they never reached the user - only "
+    "text blocks are delivered. Send those words again now as plain text, unchanged, "
+    "with no tool calls and no explanation. If they were not meant for the user, or "
+    "you already sent them as text later in that reply, reply with only <!-- silent -->."
+)
+
 # HTML-comment silence protocol: the bridge strips all <!-- ... --> from replies
 # before sending. A reply consisting solely of comments sends nothing at all.
 SILENCE_SYSTEM_PROMPT = (
@@ -231,6 +243,15 @@ class ClaudeCodeProvider(Provider):
         # values. Main-line only — subagent-attributed events are excluded.
         self.turn_output_capped: bool = False
         self._turn_output_by_request: dict[str, int] = {}
+        # Lost-text detection (reset at the start of every recv()): True once
+        # this turn showed two consecutive `thinking` blocks for the same
+        # message id — the user-facing reply was likely written into the
+        # second thinking block instead of a text block. _turn_last_block_type
+        # tracks the last content-block type seen per message.id so detection
+        # works whether cc emits one block per assistant event or a full
+        # content list in a single event.
+        self.turn_lost_text: bool = False
+        self._turn_last_block_type: dict[str, str | None] = {}
         # tool_use ids seen without a matching tool_result yet. Non-empty ->
         # _next_event() uses tool_idle_hard_s instead of idle_hard_s.
         self._pending_tool_ids: set[str] = set()
@@ -469,6 +490,8 @@ class ClaudeCodeProvider(Provider):
         # cycle so the counter measures ONLY this turn's newly produced output.
         self.turn_output_capped = False
         self._turn_output_by_request = {}
+        self.turn_lost_text = False
+        self._turn_last_block_type = {}
         self._pending_tool_ids = set()
         saw_result = False
         # first_line: an event dict already pulled off the queue by the idle
@@ -505,6 +528,7 @@ class ClaudeCodeProvider(Provider):
                     if isinstance(v, int):
                         self.usage_total[k] = self.usage_total.get(k, 0) + v
                 self._pending_tool_ids |= self._tool_use_ids(ev)
+                self._update_lost_text(ev)
             elif t == "user":
                 self._pending_tool_ids -= self._tool_result_ids(ev)
             yield ev
@@ -563,6 +587,30 @@ class ClaudeCodeProvider(Provider):
                 if isinstance(tid, str) and tid:
                     ids.add(tid)
         return ids
+
+    def _update_lost_text(self, ev: dict[str, Any]) -> None:
+        """Set turn_lost_text when two `thinking` blocks land back-to-back for
+        the same message id (main-thread events only — subagent output, which
+        carries a non-None parent_tool_use_id, is excluded). Walks the event's
+        content blocks in order against the last block type recorded for that
+        message id, so detection works whether cc emits one block per
+        assistant event or a full content list in a single event."""
+        if ev.get("parent_tool_use_id") is not None:
+            return
+        message = ev.get("message") or {}
+        msg_id = message.get("id")
+        content = message.get("content")
+        if not isinstance(msg_id, str) or not msg_id or not isinstance(content, list):
+            return
+        last_type = self._turn_last_block_type.get(msg_id)
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "thinking" and last_type == "thinking":
+                self.turn_lost_text = True
+            last_type = block_type
+        self._turn_last_block_type[msg_id] = last_type
 
     def _turn_output_breached(self, ev: dict[str, Any]) -> bool:
         """Accumulate this turn's OUTPUT tokens and report a cap breach.
