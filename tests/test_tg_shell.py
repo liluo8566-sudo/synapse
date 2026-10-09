@@ -865,6 +865,7 @@ def test_source_templates_are_configurable_from_the_cortex_section(tmp_path):
         'source_alarm = "A {at}"\n'
         'source_idle = "I {last}"\n'
         'source_idle_unknown = "I0"\n'
+        'source_cancelled = " C {at} {by}"\n'
     )
     cfg = load_config(p)
     assert cfg.shell_source_directed == "D"
@@ -872,6 +873,72 @@ def test_source_templates_are_configurable_from_the_cortex_section(tmp_path):
     assert cfg.shell_source_alarm == "A {at}"
     assert cfg.shell_source_idle == "I {last}"
     assert cfg.shell_source_idle_unknown == "I0"
+    assert cfg.shell_source_cancelled == " C {at} {by}"
+
+
+# ── cancelled-alarm receipt: an inbound message beats a booked wake ──────────
+
+def test_on_user_message_stages_a_cancellation_receipt_for_a_booked_wake(tmp_path, caplog):
+    wake_iso = "2026-07-25T10:00:00+00:00"
+    msg_iso = "2026-07-25T09:45:00+00:00"
+    clock = Clock(parse_wake_at(msg_iso))
+    host, _loop, _fed = _host(tmp_path, clock, timezone="UTC")
+    shell_state.write(tmp_path / "shells", "tg", {"next_wake_at": wake_iso})
+
+    with caplog.at_level("INFO"):
+        host.on_user_message()
+
+    assert "booked wake 10:00 cancelled by inbound 09:45" in caplog.text
+    st = shell_state.read(tmp_path / "shells", "tg")
+    saved = st["cancelled_wake"]
+    assert parse_wake_at(saved["at"]) == pytest.approx(parse_wake_at(wake_iso), abs=1)
+    assert parse_wake_at(saved["by"]) == pytest.approx(clock.t, abs=1)
+    assert "next_wake_at" not in st
+
+
+def test_on_user_message_without_a_booked_wake_stages_nothing(tmp_path):
+    clock = Clock()
+    host, _loop, _fed = _host(tmp_path, clock)
+
+    host.on_user_message()
+
+    assert "cancelled_wake" not in shell_state.read(tmp_path / "shells", "tg")
+
+
+def test_cancellation_receipt_appears_on_the_next_fed_round_then_clears(tmp_path):
+    wake_iso = "2026-07-25T10:00:00+00:00"
+    clock = Clock(parse_wake_at(wake_iso) - 15 * MIN)
+    host, _loop, fed = _host(tmp_path, clock, timezone="UTC")
+    shell_state.write(tmp_path / "shells", "tg", {"next_wake_at": wake_iso})
+    host.on_user_message()                    # cancels it; idle restarts now
+
+    clock.t += 20 * MIN                        # idle elapses -> next round is idle
+
+    asyncio.run(host._fire("tg"))
+
+    assert fed[0] == (
+        "⏳ [NEW ROUND]\n"
+        "[source: idle · last message 09:45]"
+        " · cancelled: alarm 10:00 by message 09:45"
+        "\nNOTE BODY"
+    )
+    assert "cancelled_wake" not in shell_state.read(tmp_path / "shells", "tg")
+
+
+def test_rotate_drops_the_cancellation_receipt_unread(tmp_path):
+    """A rotate ends the window: a cancellation from before it is no longer
+    this window's story, fed or not."""
+    clock = Clock()
+    host, loop, fed = _host(tmp_path, clock)
+    shell_state.write(tmp_path / "shells", "tg", {
+        "rotate_pending": True,
+        "cancelled_wake": {"at": _iso_utc(clock.t), "by": _iso_utc(clock.t)},
+    })
+
+    asyncio.run(host._fire("tg"))
+
+    assert fed == ["__RESPAWN__"]
+    assert "cancelled_wake" not in shell_state.read(tmp_path / "shells", "tg")
 
 
 # ── token ledger + fuse ───────────────────────────────────────────────────────

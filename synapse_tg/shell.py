@@ -76,6 +76,10 @@ LAST_USER_KEY = "last_user_ts"
 # the idle basis, which every machine round also resets — the idle source
 # line's "last message" time reads this key alone.
 REAL_USER_KEY = "last_real_user_ts"
+# One-shot: on_user_message stages {"at": iso, "by": iso} here when it cancels
+# an actually-booked wake. The next fed round of any kind appends it to its
+# source line, then clears it; a rotate drops it unread.
+CANCELLED_WAKE_KEY = "cancelled_wake"
 # Today's token ledger: finished sessions' finals + the local date they belong
 # to (cortex reads both to render this shell's "Cortex Today" figure).
 TOKENS_BASE_KEY = "tokens_today_base"
@@ -371,10 +375,17 @@ class ShellHost:
         """Any inbound tg message cancels a booked wake, restarts the silence
         cycle from now and stamps REAL_USER_KEY — the only path that does. A
         duty rotation's staged source line dies with that wake: the round it
-        was staged for is never fed, and the line is true of no other one."""
+        was staged for is never fed, and the line is true of no other one.
+        An actually-booked wake also leaves a one-shot cancellation receipt
+        (CANCELLED_WAKE_KEY) for the next fed round's source line."""
         now = self._clock()
-        self._set_idle_basis(now, {"next_wake_at": None,
-                                   REAL_USER_KEY: _iso(now)})
+        booked = parse_wake_at(self._read_state().get("next_wake_at"))
+        extra = {"next_wake_at": None, REAL_USER_KEY: _iso(now)}
+        if booked is not None:
+            logger.info("shell: booked wake %s cancelled by inbound %s",
+                       self._fmt_time(booked), self._fmt_time(now))
+            extra[CANCELLED_WAKE_KEY] = {"at": _iso(booked), "by": _iso(now)}
+        self._set_idle_basis(now, extra)
         self._drop_source()
         self._arm()
 
@@ -432,6 +443,9 @@ class ShellHost:
                 booked = parse_wake_at(state.get("next_wake_at"))
                 if booked is None or now < booked:
                     self._drop_source()
+                # A fresh session: whatever a prior inbound message cancelled
+                # is no longer this window's story either.
+                self._drop_cancelled_wake()
                 await self._loop.shell_rotate(booked)
                 self._arm()
                 return
@@ -440,6 +454,8 @@ class ShellHost:
             # Computed from the `state` read at the top of this call, before
             # the rendered note (possibly) consumes SOURCE_KEY.
             source = self._source_line(state, due=due, wake=wake)
+            if CANCELLED_WAKE_KEY in state:
+                self._drop_cancelled_wake()
             # Ledger before delivery: the wake is one-shot and the fed round
             # restarts the silence cycle, so a feed that dies mid-flight still
             # costs its window instead of re-firing on the next pass.
@@ -523,22 +539,42 @@ class ShellHost:
         except OSError as e:
             logger.warning("shell wake source drop failed: %s", e)
 
+    def _drop_cancelled_wake(self) -> None:
+        """Claim+clear the one-shot cancellation receipt, read or not: a round
+        that was due for it must not hand it to a later, unrelated one."""
+        try:
+            shell_state.take(self._cfg.shell_state_dir, self._shell,
+                             CANCELLED_WAKE_KEY)
+        except OSError as e:
+            logger.warning("shell cancelled-wake drop failed: %s", e)
+
     def _source_line(self, state: dict, *, due: bool, wake: float | None) -> str:
         """Why this round is firing — precedence directed > duty > alarm >
         idle. A duty wake is booked as a due-now next_wake_at (see SOURCE_KEY
         above), so duty must be read from `state` before the alarm case would
-        otherwise misname it."""
+        otherwise misname it. A pending cancellation receipt (an inbound
+        message that cancelled a booked wake before any round of it fired)
+        is appended regardless of which of the four this round turns out to
+        be."""
         cfg = self._cfg
         if str(state.get(PENDING_NOTE_KEY) or "").strip():
-            return cfg.shell_source_directed
-        if str(state.get(SOURCE_KEY) or "").strip():
-            return cfg.shell_source_duty
-        if due:
-            return cfg.shell_source_alarm.format(at=self._fmt_time(wake))
-        real = parse_wake_at(state.get(REAL_USER_KEY))
-        if real is None:
-            return cfg.shell_source_idle_unknown
-        return cfg.shell_source_idle.format(last=self._fmt_time(real))
+            line = cfg.shell_source_directed
+        elif str(state.get(SOURCE_KEY) or "").strip():
+            line = cfg.shell_source_duty
+        elif due:
+            line = cfg.shell_source_alarm.format(at=self._fmt_time(wake))
+        else:
+            real = parse_wake_at(state.get(REAL_USER_KEY))
+            line = (cfg.shell_source_idle_unknown if real is None
+                    else cfg.shell_source_idle.format(last=self._fmt_time(real)))
+        cancelled = state.get(CANCELLED_WAKE_KEY)
+        if isinstance(cancelled, dict):
+            at = parse_wake_at(cancelled.get("at"))
+            by = parse_wake_at(cancelled.get("by"))
+            if at is not None and by is not None:
+                line += cfg.shell_source_cancelled.format(
+                    at=self._fmt_time(at), by=self._fmt_time(by))
+        return line
 
     def _take_pending(self) -> str | None:
         """Claim a directed kick's text (read+clear under one lock), so a failed

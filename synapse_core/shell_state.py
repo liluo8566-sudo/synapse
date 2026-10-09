@@ -7,7 +7,7 @@ by the other side survive a merge here, and vice versa.
 
 Keys: session_id / next_wake_at / last_note_ts / last_user_ts /
 last_real_user_ts / occupancy / pending_note / rotate_pending / wake_source /
-tokens_today_base / tokens_date.
+cancelled_wake / tokens_today_base / tokens_date.
 """
 
 from __future__ import annotations

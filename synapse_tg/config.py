@@ -148,6 +148,9 @@ class TgConfig:
     shell_source_alarm: str = "[source: alarm {at}]"
     shell_source_idle: str = "[source: idle · last message {last}]"
     shell_source_idle_unknown: str = "[source: idle]"
+    # Appended once to that line when an inbound message cancelled a booked
+    # wake before any round of it fired.
+    shell_source_cancelled: str = " · cancelled: alarm {at} by message {by}"
     # Visible context broadcast: once occupancy reaches context_notify_start,
     # then again every context_notify_step above it, the chat gets one plain
     # "🗃️ Context <N>k" line. One message per tier per window (watermark in the
@@ -313,6 +316,7 @@ def load_config(path: Path | None = None) -> TgConfig:
             ("source_alarm", "shell_source_alarm"),
             ("source_idle", "shell_source_idle"),
             ("source_idle_unknown", "shell_source_idle_unknown"),
+            ("source_cancelled", "shell_source_cancelled"),
         ):
             v = cortex.get(key)
             if isinstance(v, str) and v.strip():
