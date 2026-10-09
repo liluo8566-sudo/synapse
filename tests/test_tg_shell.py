@@ -548,6 +548,29 @@ def test_user_message_cancels_the_booked_wake_and_restarts_the_window(tmp_path):
     assert host._scheduler._table["tg"][0] == pytest.approx(clock.t + 20 * MIN, abs=1)
 
 
+def test_only_an_inbound_message_stamps_real_user_presence(tmp_path):
+    """The idle source line's "last message" time reads last_real_user_ts: a
+    fed note round resets the idle basis but must leave real presence
+    untouched."""
+    clock = Clock()
+    host, _loop, fed = _host(tmp_path, clock)
+
+    async def run():
+        host._arm()
+        clock.t += 20 * MIN
+        await host._fire("tg")
+
+    asyncio.run(run())
+    assert len(fed) == 1
+    st = shell_state.read(tmp_path / "shells", "tg")
+    assert parse_wake_at(st.get("last_user_ts")) == pytest.approx(clock.t, abs=1)
+    assert "last_real_user_ts" not in st
+
+    host.on_user_message()
+    st = shell_state.read(tmp_path / "shells", "tg")
+    assert parse_wake_at(st["last_real_user_ts"]) == pytest.approx(clock.t, abs=1)
+
+
 def test_restart_continues_the_running_idle_window(tmp_path):
     """Basis 5min old on disk -> the fresh host owes 15 more minutes, and the
     boot pass itself feeds nothing."""
@@ -696,7 +719,7 @@ def test_pending_note_is_fed_instead_of_the_rendered_note_and_cleared(tmp_path):
     asyncio.run(host._fire("tg"))
 
     assert len(fed) == 1
-    assert fed[0] == "⏳ [NEW ROUND]\ngo check the diary"
+    assert fed[0] == "⏳ [NEW ROUND]\n[source: directed]\ngo check the diary"
     assert "NOTE BODY" not in fed[0]
     assert "pending_note" not in shell_state.read(tmp_path / "shells", "tg")
 
@@ -713,7 +736,7 @@ def test_pending_note_fires_while_asleep_without_consuming_next_wake_at(tmp_path
 
     asyncio.run(host._fire("tg"))
 
-    assert fed == ["⏳ [NEW ROUND]\nwake up"]
+    assert fed == ["⏳ [NEW ROUND]\n[source: directed]\nwake up"]
     st = shell_state.read(tmp_path / "shells", "tg")
     assert st["next_wake_at"] == later
 
@@ -742,7 +765,7 @@ def test_kick_lost_during_a_feed_is_recovered_by_the_rearm(tmp_path):
         await host._fire("tg")               # next scheduler pass
 
     asyncio.run(run())
-    assert fed[1] == "⏳ [NEW ROUND]\nlate one"
+    assert fed[1] == "⏳ [NEW ROUND]\n[source: directed]\nlate one"
 
 
 def test_boot_arms_before_the_kick_socket_opens(tmp_path, short_sock):
@@ -783,6 +806,72 @@ def test_take_reads_and_clears_in_one_pass(tmp_path):
     assert shell_state.take(tmp_path / "shells", "tg", "pending_note") == "x"
     assert shell_state.take(tmp_path / "shells", "tg", "pending_note") is None
     assert shell_state.read(tmp_path / "shells", "tg")["session_id"] == "s"
+
+
+# ── source line (why this round fired): directed > duty > alarm > idle ───────
+
+def test_source_line_is_alarm_with_the_booked_wake_time(tmp_path):
+    wake_iso = "2026-07-25T10:00:00+00:00"
+    clock = Clock(parse_wake_at(wake_iso))
+    host, _loop, fed = _host(tmp_path, clock, timezone="UTC")
+    shell_state.write(tmp_path / "shells", "tg", {"next_wake_at": wake_iso})
+
+    asyncio.run(host._fire("tg"))
+
+    assert fed[0] == "⏳ [NEW ROUND]\n[source: alarm 10:00]\nNOTE BODY"
+
+
+def test_source_line_is_duty_even_when_the_booked_wake_is_also_due(tmp_path):
+    """A duty wake is booked as a due-now next_wake_at — without reading
+    SOURCE_KEY (from the ledger state read at the top of _fire) before the
+    alarm check, this would misname as an alarm instead."""
+    clock = Clock()
+    host, _loop, fed = _host(tmp_path, clock, timezone="UTC")
+    shell_state.write(tmp_path / "shells", "tg",
+                      {"next_wake_at": _iso_utc(clock.t), "wake_source": "whatever"})
+
+    asyncio.run(host._fire("tg"))
+
+    assert fed[0].split("\n")[1] == "[source: duty]"
+
+
+def test_source_line_is_idle_unknown_without_any_real_message(tmp_path):
+    clock = Clock()
+    host, _loop, fed = _host(tmp_path, clock, timezone="UTC")
+    clock.t += 20 * MIN
+
+    asyncio.run(host._fire("tg"))
+
+    assert fed[0] == "⏳ [NEW ROUND]\n[source: idle]\nNOTE BODY"
+
+
+def test_source_line_is_idle_with_the_last_real_message_time(tmp_path):
+    clock = Clock(parse_wake_at("2026-07-25T09:00:00+00:00"))
+    host, _loop, fed = _host(tmp_path, clock, timezone="UTC")
+    host.on_user_message()
+    clock.t += 20 * MIN
+
+    asyncio.run(host._fire("tg"))
+
+    assert fed[0] == "⏳ [NEW ROUND]\n[source: idle · last message 09:00]\nNOTE BODY"
+
+
+def test_source_templates_are_configurable_from_the_cortex_section(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text(
+        '[cortex]\n'
+        'source_directed = "D"\n'
+        'source_duty = "U"\n'
+        'source_alarm = "A {at}"\n'
+        'source_idle = "I {last}"\n'
+        'source_idle_unknown = "I0"\n'
+    )
+    cfg = load_config(p)
+    assert cfg.shell_source_directed == "D"
+    assert cfg.shell_source_duty == "U"
+    assert cfg.shell_source_alarm == "A {at}"
+    assert cfg.shell_source_idle == "I {last}"
+    assert cfg.shell_source_idle_unknown == "I0"
 
 
 # ── token ledger + fuse ───────────────────────────────────────────────────────

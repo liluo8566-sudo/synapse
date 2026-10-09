@@ -33,6 +33,12 @@ shell came up — which the note renderer claims on the round it delivers.
 Anything that ends the staged round without feeding it (a respawn with no wake
 of its own, an inbound message cancelling the booked wake) discards the line
 rather than let it surface on a later, unrelated wake.
+
+Every fed round also carries its own `[source: ...]` line (directed / duty /
+alarm / idle, precedence in that order) as the second line of the body, right
+after shell_note_tag — computed in _fire from the ledger state read at the
+top of that call, before anything (the render subprocess, the pending-note
+claim) consumes it.
 """
 
 from __future__ import annotations
@@ -66,6 +72,10 @@ SOURCE_KEY = "wake_source"
 # Idle basis: start of the current silence window, persisted so a restart
 # continues that window instead of opening a fresh one that fires at once.
 LAST_USER_KEY = "last_user_ts"
+# Real user presence: written only by an inbound user message. Distinct from
+# the idle basis, which every machine round also resets — the idle source
+# line's "last message" time reads this key alone.
+REAL_USER_KEY = "last_real_user_ts"
 # Today's token ledger: finished sessions' finals + the local date they belong
 # to (cortex reads both to render this shell's "Cortex Today" figure).
 TOKENS_BASE_KEY = "tokens_today_base"
@@ -324,6 +334,11 @@ class ShellHost:
     def _silence_deadline(self) -> float:
         return self._last_user_ts + self._idle_window()
 
+    def _fmt_time(self, ts: float) -> str:
+        """HH:MM in the configured display timezone — the wake/message times
+        rendered into a round's source line."""
+        return datetime.fromtimestamp(ts, self._tz).strftime("%H:%M")
+
     def _deadline(self, state: dict, now: float) -> float:
         # A pending direction or rotate is due NOW — against the CALLER's own
         # `now`, never a fresh read: a fresh self._clock() here used to race
@@ -353,11 +368,13 @@ class ShellHost:
         logger.info("shell armed: next round at %s", _iso(at))
 
     def on_user_message(self) -> None:
-        """Any inbound tg message cancels a booked wake and restarts the
-        silence cycle from now. A duty rotation's staged source line dies with
-        that wake: the round it was staged for is never fed, and the line is
-        true of no other one."""
-        self._set_idle_basis(self._clock(), {"next_wake_at": None})
+        """Any inbound tg message cancels a booked wake, restarts the silence
+        cycle from now and stamps REAL_USER_KEY — the only path that does. A
+        duty rotation's staged source line dies with that wake: the round it
+        was staged for is never fed, and the line is true of no other one."""
+        now = self._clock()
+        self._set_idle_basis(now, {"next_wake_at": None,
+                                   REAL_USER_KEY: _iso(now)})
         self._drop_source()
         self._arm()
 
@@ -420,12 +437,15 @@ class ShellHost:
                 return
             wake = parse_wake_at(state.get("next_wake_at"))
             due = wake is not None and now >= wake
+            # Computed from the `state` read at the top of this call, before
+            # the rendered note (possibly) consumes SOURCE_KEY.
+            source = self._source_line(state, due=due, wake=wake)
             # Ledger before delivery: the wake is one-shot and the fed round
             # restarts the silence cycle, so a feed that dies mid-flight still
             # costs its window instead of re-firing on the next pass.
             self._set_idle_basis(self._clock(),
                                  {"next_wake_at": None} if due else None)
-            await self._feed_note(self._take_pending())
+            await self._feed_note(self._take_pending(), source)
             self._arm()
         except Exception:  # noqa: BLE001 — a dropped deadline is silent death
             logger.exception("shell fire failed for %s — re-arming from ledger", shell)
@@ -503,6 +523,23 @@ class ShellHost:
         except OSError as e:
             logger.warning("shell wake source drop failed: %s", e)
 
+    def _source_line(self, state: dict, *, due: bool, wake: float | None) -> str:
+        """Why this round is firing — precedence directed > duty > alarm >
+        idle. A duty wake is booked as a due-now next_wake_at (see SOURCE_KEY
+        above), so duty must be read from `state` before the alarm case would
+        otherwise misname it."""
+        cfg = self._cfg
+        if str(state.get(PENDING_NOTE_KEY) or "").strip():
+            return cfg.shell_source_directed
+        if str(state.get(SOURCE_KEY) or "").strip():
+            return cfg.shell_source_duty
+        if due:
+            return cfg.shell_source_alarm.format(at=self._fmt_time(wake))
+        real = parse_wake_at(state.get(REAL_USER_KEY))
+        if real is None:
+            return cfg.shell_source_idle_unknown
+        return cfg.shell_source_idle.format(last=self._fmt_time(real))
+
     def _take_pending(self) -> str | None:
         """Claim a directed kick's text (read+clear under one lock), so a failed
         feed cannot loop on it and a concurrent write cannot be swallowed."""
@@ -515,9 +552,12 @@ class ShellHost:
         text = str(raw or "").strip()
         return text or None
 
-    async def _feed_note(self, direction: str | None = None) -> None:
+    async def _feed_note(self, direction: str | None, source: str) -> None:
         """One fed round: the directed text when a kick left one, else the
-        rendered wakeup note."""
+        rendered wakeup note. `source` is this round's `[source: ...]` line,
+        computed by the caller from the ledger state read at the top of
+        _fire — before the render call below, which may itself consume
+        SOURCE_KEY."""
         if direction:
             note = direction
         else:
@@ -526,7 +566,7 @@ class ShellHost:
             return  # log already emitted; the cycle re-arms regardless
         logger.info("shell fire: feeding a %s round (%d chars)",
                     "directed" if direction else "note", len(note))
-        body = f"{self._cfg.shell_note_tag}\n{note}".strip()
+        body = f"{self._cfg.shell_note_tag}\n{source}\n{note}".strip()
         delivered = await self._feed(body)
         if delivered:
             self._write_state({"last_note_ts": _iso(self._clock())})

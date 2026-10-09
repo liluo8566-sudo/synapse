@@ -141,6 +141,13 @@ class TgConfig:
         "Session context fused. Update handoff before rotate. Add todo if any. "
         "lie_down(rotate=True)"
     )
+    # Why a round fired — its own line, right after shell_note_tag. Precedence
+    # directed > duty > alarm > idle. {at}/{last} render in [core].timezone.
+    shell_source_directed: str = "[source: directed]"
+    shell_source_duty: str = "[source: duty]"
+    shell_source_alarm: str = "[source: alarm {at}]"
+    shell_source_idle: str = "[source: idle · last message {last}]"
+    shell_source_idle_unknown: str = "[source: idle]"
     # Visible context broadcast: once occupancy reaches context_notify_start,
     # then again every context_notify_step above it, the chat gets one plain
     # "🗃️ Context <N>k" line. One message per tier per window (watermark in the
@@ -301,6 +308,11 @@ def load_config(path: Path | None = None) -> TgConfig:
             ("shell_peer_fallback", "shell_peer_fallback"),
             ("fuse_tag", "shell_fuse_tag"),
             ("fuse_prompt_text", "shell_fuse_prompt_text"),
+            ("source_directed", "shell_source_directed"),
+            ("source_duty", "shell_source_duty"),
+            ("source_alarm", "shell_source_alarm"),
+            ("source_idle", "shell_source_idle"),
+            ("source_idle_unknown", "shell_source_idle_unknown"),
         ):
             v = cortex.get(key)
             if isinstance(v, str) and v.strip():
