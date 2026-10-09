@@ -95,6 +95,12 @@ class Scheduler:
             self._pending_kicks -= due
             for shell in due:
                 await self._fire(shell)
+            # Safety net: a callback that re-arms itself for right now (a bug
+            # matching this, not a feature) must still never starve the loop.
+            # Nothing in the fire path above is guaranteed to await for real,
+            # so without this a self-rearming callback could spin here
+            # forever with no suspension point at all.
+            await asyncio.sleep(0)
             return
         timeout = self._time_to_nearest(now)
         self._wake.clear()

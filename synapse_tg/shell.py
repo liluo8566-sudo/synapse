@@ -324,15 +324,23 @@ class ShellHost:
     def _silence_deadline(self) -> float:
         return self._last_user_ts + self._idle_window()
 
-    def _deadline(self, state: dict) -> float:
-        # A pending direction or rotate is due NOW: this is also what saves a
+    def _deadline(self, state: dict, now: float) -> float:
+        # A pending direction or rotate is due NOW — against the CALLER's own
+        # `now`, never a fresh read: a fresh self._clock() here used to race
+        # _fire's `now` (a hair later on a real clock, which only ever
+        # advances), so `now < deadline` was always true and _fire never got
+        # past its own due-check. Every path out of that was a re-arm with no
+        # await in it, so the scheduler re-fired at once, forever — a tight
+        # loop with no suspension anywhere in it, starving the whole bridge
+        # (tg polling, reply delivery, provider stream) until two clock reads
+        # happened to land on the same instant. This is also what saves a
         # kick that landed while a feed was in flight (the scheduler drops a
-        # kick for a shell whose entry is currently firing) — the re-arm after
-        # that feed sees the flag and schedules an immediate round.
+        # kick for a shell whose entry is currently firing) — the re-arm
+        # after that feed sees the flag and schedules an immediate round.
         if state.get(ROTATE_KEY):
-            return self._clock()
+            return now
         if str(state.get(PENDING_NOTE_KEY) or "").strip():
-            return self._clock()
+            return now
         # A booked wake suspends the idle cycle entirely: while next_wake_at
         # stands it IS the deadline, never raced against the silence one.
         wake = parse_wake_at(state.get("next_wake_at"))
@@ -340,7 +348,7 @@ class ShellHost:
 
     def _arm(self, state: dict | None = None) -> None:
         st = self._read_state() if state is None else state
-        at = self._deadline(st)
+        at = self._deadline(st, self._clock())
         self._scheduler.schedule(self._shell, at, self._fire)
         logger.info("shell armed: next round at %s", _iso(at))
 
@@ -370,7 +378,7 @@ class ShellHost:
         try:
             state = self._read_state()
             now = self._clock()
-            if now < self._deadline(state):
+            if now < self._deadline(state, now):
                 self._arm(state)
                 return
             # Circuit breaker: no autonomous round while this shell is held.

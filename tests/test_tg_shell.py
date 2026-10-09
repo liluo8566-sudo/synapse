@@ -106,6 +106,22 @@ class Clock:
         return self.t
 
 
+class AdvancingClock:
+    """Every read is strictly later than the last one — the real wall clock's
+    behaviour, unlike Clock above (frozen unless a test moves it by hand).
+    This is what exposed the re-arm freeze: _deadline used to re-read the
+    clock itself, so two reads inside one _fire call always disagreed by a
+    hair and `now < deadline` was always true."""
+
+    def __init__(self, t=1_000_000.0, step=1e-6) -> None:
+        self.t = t
+        self.step = step
+
+    def __call__(self) -> float:
+        self.t += self.step
+        return self.t
+
+
 def _cfg(tmp_path, **kw):
     # Marrow config dir = parent of marrow_db (shared with breaker files).
     # shell_active() reads [cortex].shells from here (T7 single source) —
@@ -445,6 +461,39 @@ def test_kick_over_the_socket_reaches_the_scheduler(tmp_path, short_sock):
     asyncio.run(run())
     assert len(fed) == 1
     assert not short_sock.exists()               # socket cleaned up on stop
+
+
+# ── regression: the re-arm freeze (a stale second clock read in _deadline) ───
+
+def test_pending_note_is_fed_once_with_a_real_advancing_clock(tmp_path):
+    """On a real (advancing) clock, _deadline used to re-read self._clock()
+    for ROTATE_KEY/PENDING_NOTE_KEY, landing a hair after _fire's own `now`
+    — so `now < deadline` was always true, _fire always bailed into a bare
+    re-arm, and the scheduler refired at once. No await anywhere in that
+    path, so it span forever with the loop never yielding: the whole bridge
+    froze. One _fire call must now actually claim and feed the note."""
+    clock = AdvancingClock()
+    host, _loop, fed = _host(tmp_path, clock)
+    shell_state.write(tmp_path / "shells", "tg", {"pending_note": "go check the diary"})
+
+    asyncio.run(host._fire("tg"))
+
+    assert len(fed) == 1
+    assert "go check the diary" in fed[0]
+    assert "pending_note" not in shell_state.read(tmp_path / "shells", "tg")
+
+
+def test_rotate_pending_rotates_once_with_a_real_advancing_clock(tmp_path):
+    """Same freeze, ROTATE_KEY side: one _fire call must respawn, not bail
+    into an endless re-arm."""
+    clock = AdvancingClock()
+    host, _loop, fed = _host(tmp_path, clock)
+    shell_state.write(tmp_path / "shells", "tg", {"rotate_pending": True})
+
+    asyncio.run(host._fire("tg"))
+
+    assert fed == ["__RESPAWN__"]
+    assert "rotate_pending" not in shell_state.read(tmp_path / "shells", "tg")
 
 
 # ── wake vs idle: mutual exclusion, persisted basis ───────────────────────────

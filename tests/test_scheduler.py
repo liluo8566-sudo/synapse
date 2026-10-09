@@ -162,6 +162,42 @@ async def test_callback_exception_does_not_kill_loop():
     assert hits == ["tg"]
 
 
+async def test_tick_yields_after_firing_so_other_tasks_can_progress():
+    """Safety net for the tg freeze pattern: a callback that keeps re-arming
+    itself for right now must not be able to spin this loop forever without
+    any other task on the same event loop ever getting a turn. _tick's
+    post-fire `await asyncio.sleep(0)` guarantees at least one yield per
+    pass, regardless of whether the callback itself ever awaits anything."""
+    clock = FakeClock()
+    sched = Scheduler(clock=clock.time, sleep=clock.sleep)
+    fire_count = 0
+
+    async def selfish(shell: str) -> None:
+        nonlocal fire_count
+        fire_count += 1
+        if fire_count < 20:                      # bounded so the test ends
+            sched.schedule(shell, clock.time(), selfish)  # re-arms for "now"
+
+    sched.schedule("cli", at=0.0, callback=selfish)
+
+    other_ticks = 0
+
+    async def other_task() -> None:
+        nonlocal other_ticks
+        for _ in range(20):
+            await asyncio.sleep(0)
+            other_ticks += 1
+
+    other = asyncio.create_task(other_task())
+
+    while fire_count < 20:
+        await sched._tick()
+    ticks_during_the_burst = other_ticks          # snapshot before awaiting other
+
+    await other
+    assert ticks_during_the_burst > 0
+
+
 async def test_sync_callback_supported():
     clock = FakeClock()
     sched = Scheduler(clock=clock.time, sleep=clock.sleep)
