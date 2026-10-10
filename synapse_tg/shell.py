@@ -34,17 +34,28 @@ Anything that ends the staged round without feeding it (a respawn with no wake
 of its own, an inbound message cancelling the booked wake) discards the line
 rather than let it surface on a later, unrelated wake.
 
-Every fed round also carries its own `[source: ...]` line (directed / duty /
-alarm / idle, precedence in that order) as the second line of the body, right
-after shell_note_tag — computed in _fire from the ledger state read at the
-top of that call, before anything (the render subprocess, the pending-note
-claim) consumes it.
+A third, independent input is the signal ear (T11): check_signal polls
+shell_signal_log (a plain file other processes append lines to, e.g.
+power_watch.sh / at_call.sh) and merges new lines into PENDING_SIGNAL_KEY,
+then arms the scheduler now — instead of the resident itself arming a Claude
+Code Monitor on that file, whose 30-minute cap forced a useless re-arm turn
+every cycle. A shell held by the breaker or a duty hold owns no autonomy of
+its own, so a poll landing on one drops its lines (after advancing the
+offset) rather than stage anything.
+
+Every fed round also carries its own `[source: ...]` line (directed / signal /
+duty / alarm / idle, precedence in that order) as the second line of the body,
+right after shell_note_tag — computed in _fire from the ledger state read at
+the top of that call, before anything (the render subprocess, the
+pending-note/pending-signal claim) consumes it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import subprocess
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -52,6 +63,8 @@ from zoneinfo import ZoneInfo
 
 from synapse_core import breaker, shell_state
 from synapse_core.scheduler import Scheduler
+
+from .signal_tail import tail_new_lines
 
 if TYPE_CHECKING:
     from .config import TgConfig
@@ -91,6 +104,18 @@ CONTEXT_TIER_KEY = "context_tier"
 # in-memory) so a restart can neither re-announce a trip nor miss one written
 # while the process was down.
 BREAKER_ANNOUNCED_KEY = "breaker_announced_ts"
+# Signal ear (T11): byte offset check_signal has consumed shell_signal_log
+# through. Absent on first boot -> adopt the current EOF (tail -n 0 -f),
+# delivering nothing already on disk.
+SIGNAL_OFFSET_KEY = "signal_offset"
+# New shell_signal_log lines, newline-joined, waiting for a round to claim
+# them. The ONLY other writer is _fire's claim below (shell_state.take,
+# atomic under the shared lock); check_signal's own merge-then-write has no
+# await between its read and its write, so no task switch can land between
+# them — see check_signal for why that makes the two writers safe together
+# without a read-modify-write primitive in shell_state.
+PENDING_SIGNAL_KEY = "pending_signal"
+_SKIP_NOTE_RE = re.compile(r"^\(\d+ earlier lines skipped\)$")
 OCCUPANCY_KEYS = (
     "input_tokens",
     "cache_read_input_tokens",
@@ -360,6 +385,8 @@ class ShellHost:
             return now
         if str(state.get(PENDING_NOTE_KEY) or "").strip():
             return now
+        if str(state.get(PENDING_SIGNAL_KEY) or "").strip():
+            return now
         # A booked wake suspends the idle cycle entirely: while next_wake_at
         # stands it IS the deadline, never raced against the silence one.
         wake = parse_wake_at(state.get("next_wake_at"))
@@ -461,7 +488,13 @@ class ShellHost:
             # costs its window instead of re-firing on the next pass.
             self._set_idle_basis(self._clock(),
                                  {"next_wake_at": None} if due else None)
-            await self._feed_note(self._take_pending(), source)
+            # Directed beats signal: a signal claimed here too would be fed
+            # silently alongside the directed text with no source line of its
+            # own. Left unclaimed, it is still due (see _deadline) and fires
+            # on the immediate re-arm below.
+            direction = self._take_pending()
+            signal = None if direction else self._take_pending_signal()
+            await self._feed_note(direction, signal, source)
             self._arm()
         except Exception:  # noqa: BLE001 — a dropped deadline is silent death
             logger.exception("shell fire failed for %s — re-arming from ledger", shell)
@@ -549,16 +582,18 @@ class ShellHost:
             logger.warning("shell cancelled-wake drop failed: %s", e)
 
     def _source_line(self, state: dict, *, due: bool, wake: float | None) -> str:
-        """Why this round is firing — precedence directed > duty > alarm >
-        idle. A duty wake is booked as a due-now next_wake_at (see SOURCE_KEY
-        above), so duty must be read from `state` before the alarm case would
-        otherwise misname it. A pending cancellation receipt (an inbound
-        message that cancelled a booked wake before any round of it fired)
-        is appended regardless of which of the four this round turns out to
-        be."""
+        """Why this round is firing — precedence directed > signal > duty >
+        alarm > idle. A duty wake is booked as a due-now next_wake_at (see
+        SOURCE_KEY above), so duty must be read from `state` before the alarm
+        case would otherwise misname it. A pending cancellation receipt (an
+        inbound message that cancelled a booked wake before any round of it
+        fired) is appended regardless of which of the five this round turns
+        out to be."""
         cfg = self._cfg
         if str(state.get(PENDING_NOTE_KEY) or "").strip():
             line = cfg.shell_source_directed
+        elif str(state.get(PENDING_SIGNAL_KEY) or "").strip():
+            line = cfg.shell_source_signal
         elif str(state.get(SOURCE_KEY) or "").strip():
             line = cfg.shell_source_duty
         elif due:
@@ -588,20 +623,34 @@ class ShellHost:
         text = str(raw or "").strip()
         return text or None
 
-    async def _feed_note(self, direction: str | None, source: str) -> None:
+    def _take_pending_signal(self) -> str | None:
+        """Claim the signal ear's accumulated text (read+clear under one
+        lock) — same contract as _take_pending, for PENDING_SIGNAL_KEY."""
+        try:
+            raw = shell_state.take(self._cfg.shell_state_dir, self._shell,
+                                   PENDING_SIGNAL_KEY)
+        except OSError as e:
+            logger.warning("shell pending signal read failed: %s", e)
+            return None
+        text = str(raw or "").strip()
+        return text or None
+
+    async def _feed_note(self, direction: str | None, signal: str | None,
+                         source: str) -> None:
         """One fed round: the directed text when a kick left one, else the
-        rendered wakeup note. `source` is this round's `[source: ...]` line,
-        computed by the caller from the ledger state read at the top of
-        _fire — before the render call below, which may itself consume
-        SOURCE_KEY."""
+        polled signal text when check_signal staged one, else the rendered
+        wakeup note. `source` is this round's `[source: ...]` line, computed
+        by the caller from the ledger state read at the top of _fire — before
+        the render call below, which may itself consume SOURCE_KEY."""
         if direction:
-            note = direction
+            note, kind = direction, "directed"
+        elif signal:
+            note, kind = signal, "signal"
         else:
-            note = await asyncio.to_thread(self._render_note)
+            note, kind = await asyncio.to_thread(self._render_note), "note"
         if not note:
             return  # log already emitted; the cycle re-arms regardless
-        logger.info("shell fire: feeding a %s round (%d chars)",
-                    "directed" if direction else "note", len(note))
+        logger.info("shell fire: feeding a %s round (%d chars)", kind, len(note))
         body = f"{self._cfg.shell_note_tag}\n{source}\n{note}".strip()
         delivered = await self._feed(body)
         if delivered:
@@ -614,6 +663,59 @@ class ShellHost:
             return await self._loop.feed_turn(body)
         finally:
             self._feeding = False
+
+    # --- signal ear (T11) -------------------------------------------------
+
+    async def check_signal(self, context) -> None:
+        """job_queue tick: tail shell_signal_log for lines appended since the
+        last poll. Empty config = off. Never raises — a poll must not take
+        the shell down."""
+        path = self._cfg.shell_signal_log
+        if not path:
+            return
+        try:
+            await self._poll_signal(os.path.expanduser(path))
+        except Exception:  # noqa: BLE001
+            logger.exception("signal: poll failed")
+
+    async def _poll_signal(self, path: str) -> None:
+        offset = self._read_state().get(SIGNAL_OFFSET_KEY)
+        if offset is None:
+            # First boot: adopt the current EOF (tail -n 0 -f) — nothing
+            # already on disk is delivered.
+            size = await asyncio.to_thread(_safe_file_size, path)
+            self._write_state({SIGNAL_OFFSET_KEY: size})
+            return
+        try:
+            offset = int(offset)
+        except (TypeError, ValueError):
+            offset = 0
+        lines, new_offset = await asyncio.to_thread(tail_new_lines, path, offset)
+        if new_offset != offset:
+            self._write_state({SIGNAL_OFFSET_KEY: new_offset})
+        if not lines:
+            return
+        if self._breaker_holds():
+            # Another shell owns autonomy and listens for itself — the
+            # offset above has already advanced, so these lines are gone for
+            # good rather than replayed once the hold clears.
+            logger.info("signal: %d line(s) dropped — shell held", len(lines))
+            return
+        # No await from here to the write below: this read and that write
+        # form one synchronous section, so no other coroutine can run a
+        # concurrent shell_state.take(PENDING_SIGNAL_KEY) (_fire's claim, the
+        # only other writer of this key) between them. shell_state has no
+        # read-modify-write primitive of its own; this is what stands in for
+        # one.
+        state = self._read_state()
+        existing = _pending_signal_lines(state.get(PENDING_SIGNAL_KEY))
+        combined = existing + lines
+        cap = self._cfg.shell_signal_max_lines
+        if cap > 0 and len(combined) > cap:
+            dropped = len(combined) - cap
+            combined = [f"({dropped} earlier lines skipped)"] + combined[-cap:]
+        self._write_state({PENDING_SIGNAL_KEY: "\n".join(combined)})
+        self._arm()
 
     # --- token ledger + fuse --------------------------------------------
 
@@ -674,3 +776,23 @@ class ShellHost:
 
 def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _safe_file_size(path: str) -> int:
+    """Current EOF, or 0 for a file that does not exist yet (the next poll
+    reads it from the start once it appears — never a negative offset)."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _pending_signal_lines(raw) -> list[str]:
+    """PENDING_SIGNAL_KEY's stored text -> its lines, with a previous
+    "(K earlier lines skipped)" note (if any) stripped — it is recomputed
+    fresh against the new combined total rather than compounded."""
+    text = str(raw or "")
+    lines = [ln for ln in text.split("\n") if ln.strip()] if text else []
+    if lines and _SKIP_NOTE_RE.match(lines[0]):
+        lines = lines[1:]
+    return lines

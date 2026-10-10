@@ -1679,6 +1679,26 @@ def test_config_parses_the_cortex_section(tmp_path):
     assert cfg.shell_fuse_tokens == 1234
 
 
+def test_config_parses_the_signal_ear_keys(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        '[cortex]\n'
+        'signal_log = "~/.config/marrow/cortex/wake_signal.log"\n'
+        'signal_poll_s = 10\n'
+        'signal_max_lines = 7\n'
+        'source_signal = "[source: beep]"\n'
+    )
+    cfg = load_config(p)
+    assert cfg.shell_signal_log == "~/.config/marrow/cortex/wake_signal.log"
+    assert cfg.shell_signal_poll_s == 10.0
+    assert cfg.shell_signal_max_lines == 7
+    assert cfg.shell_source_signal == "[source: beep]"
+
+
+def test_config_signal_ear_defaults_to_off(tmp_path):
+    assert TgConfig().shell_signal_log == ""
+
+
 def test_config_shell_enabled_true_parses_quietly(tmp_path, caplog):
     p = tmp_path / "config.toml"
     p.write_text('[cortex]\nshell_enabled = true\n')
@@ -1814,3 +1834,184 @@ def test_live_chat_still_wins_over_the_configured_chat_id(tmp_path):
 
     asyncio.run(run())
     assert {m["chat_id"] for m in bot.sent} == {99}
+
+
+# ── signal ear (T11): tail shell_signal_log instead of the resident's own
+#    Claude Code Monitor on the same file ──────────────────────────────────
+
+def test_signal_first_boot_stores_eof_offset_and_feeds_nothing(tmp_path):
+    clock = Clock()
+    log = tmp_path / "wake_signal.log"
+    log.write_text("[power 09:00] already here\n")
+    host, _loop, fed = _host(tmp_path, clock, shell_signal_log=str(log))
+
+    asyncio.run(host.check_signal(None))
+
+    st = shell_state.read(tmp_path / "shells", "tg")
+    assert st["signal_offset"] == log.stat().st_size
+    assert "pending_signal" not in st
+    assert fed == []
+
+
+def test_signal_appended_lines_feed_one_round(tmp_path):
+    clock = Clock()
+    log = tmp_path / "wake_signal.log"
+    log.write_text("")
+    host, _loop, fed = _host(tmp_path, clock, shell_signal_log=str(log))
+    asyncio.run(host.check_signal(None))      # boot: adopt EOF (empty file)
+
+    with log.open("a") as f:
+        f.write("[power 10:05] battery low\n")
+
+    async def run():
+        await host.check_signal(None)         # staged + armed
+        await host._fire("tg")
+
+    asyncio.run(run())
+
+    assert len(fed) == 1
+    lines = fed[0].split("\n")
+    assert lines[1] == "[source: signal]"
+    assert "[power 10:05] battery low" in fed[0]
+    st = shell_state.read(tmp_path / "shells", "tg")
+    assert st["signal_offset"] == log.stat().st_size
+    assert "pending_signal" not in st
+
+
+def test_signal_partial_line_waits_for_its_newline(tmp_path):
+    clock = Clock()
+    log = tmp_path / "wake_signal.log"
+    log.write_text("")
+    host, _loop, fed = _host(tmp_path, clock, shell_signal_log=str(log))
+    asyncio.run(host.check_signal(None))       # boot
+
+    with log.open("a") as f:
+        f.write("[power 10:05] partial")       # no newline yet
+    asyncio.run(host.check_signal(None))
+    assert "pending_signal" not in shell_state.read(tmp_path / "shells", "tg")
+    assert fed == []
+
+    with log.open("a") as f:
+        f.write(" line\n")
+    asyncio.run(host.check_signal(None))
+    st = shell_state.read(tmp_path / "shells", "tg")
+    assert "[power 10:05] partial line" in st["pending_signal"]
+
+
+def test_signal_truncated_file_resets_offset_to_zero(tmp_path):
+    clock = Clock()
+    log = tmp_path / "wake_signal.log"
+    log.write_text("[power 09:00] one\n[power 09:01] two\n")
+    host, _loop, fed = _host(tmp_path, clock, shell_signal_log=str(log))
+    asyncio.run(host.check_signal(None))       # boot adopts the current EOF
+
+    log.write_text("[power 09:05] fresh\n")    # replaced with a shorter file
+
+    asyncio.run(host.check_signal(None))
+    st = shell_state.read(tmp_path / "shells", "tg")
+    assert "[power 09:05] fresh" in st["pending_signal"]
+    assert st["signal_offset"] == log.stat().st_size
+
+
+def test_signal_held_shell_drops_lines_but_advances_offset(tmp_path):
+    from synapse_core import breaker
+
+    clock = Clock()
+    log = tmp_path / "wake_signal.log"
+    log.write_text("")
+    host, _loop, fed = _host(tmp_path, clock, shell_signal_log=str(log))
+    asyncio.run(host.check_signal(None))
+
+    with log.open("a") as f:
+        f.write("[power 10:05] battery low\n")
+    breaker.trip(tmp_path, "all")
+
+    asyncio.run(host.check_signal(None))
+
+    st = shell_state.read(tmp_path / "shells", "tg")
+    assert "pending_signal" not in st
+    assert st["signal_offset"] == log.stat().st_size
+    assert fed == []
+
+
+def test_signal_cap_trims_and_adds_skip_note(tmp_path):
+    clock = Clock()
+    log = tmp_path / "wake_signal.log"
+    log.write_text("")
+    host, _loop, fed = _host(tmp_path, clock, shell_signal_log=str(log),
+                             shell_signal_max_lines=3)
+    asyncio.run(host.check_signal(None))
+
+    with log.open("a") as f:
+        for i in range(5):
+            f.write(f"[power 10:0{i}] line {i}\n")
+
+    asyncio.run(host.check_signal(None))
+    st = shell_state.read(tmp_path / "shells", "tg")
+    lines = st["pending_signal"].split("\n")
+    assert lines[0] == "(2 earlier lines skipped)"
+    assert lines[1:] == ["[power 10:02] line 2", "[power 10:03] line 3",
+                         "[power 10:04] line 4"]
+
+
+def test_signal_directed_takes_precedence_then_signal_fires_next(tmp_path):
+    clock = Clock()
+    log = tmp_path / "wake_signal.log"
+    log.write_text("")
+    host, _loop, fed = _host(tmp_path, clock, shell_signal_log=str(log))
+    asyncio.run(host.check_signal(None))
+
+    with log.open("a") as f:
+        f.write("[power 10:05] battery low\n")
+    asyncio.run(host.check_signal(None))
+    shell_state.write(tmp_path / "shells", "tg", {"pending_note": "go check the diary"})
+
+    async def run():
+        await host._fire("tg")       # directed round
+        await host._fire("tg")       # immediate re-arm: the signal round
+
+    asyncio.run(run())
+    assert fed[0] == "⏳ [NEW ROUND]\n[source: directed]\ngo check the diary"
+    assert "[source: signal]" in fed[1]
+    assert "[power 10:05] battery low" in fed[1]
+    assert "pending_signal" not in shell_state.read(tmp_path / "shells", "tg")
+
+
+def test_signal_pending_makes_deadline_due_now(tmp_path):
+    clock = Clock()
+    host, _loop, _fed = _host(tmp_path, clock)
+    shell_state.write(tmp_path / "shells", "tg", {"pending_signal": "x"})
+    assert host._deadline(host._read_state(), clock.t) == clock.t
+
+
+def test_signal_rotate_keeps_pending_signal_for_the_fresh_session(tmp_path):
+    clock = Clock()
+    host, loop, fed = _host(tmp_path, clock)
+    shell_state.write(tmp_path / "shells", "tg", {
+        "rotate_pending": True, "pending_signal": "[power 10:05] battery low"})
+
+    asyncio.run(host._fire("tg"))     # rotate: respawn, no feed
+
+    assert fed == ["__RESPAWN__"]
+    st = shell_state.read(tmp_path / "shells", "tg")
+    assert st["pending_signal"] == "[power 10:05] battery low"
+
+    asyncio.run(host._fire("tg"))     # the re-armed due-now round
+    assert "[power 10:05] battery low" in fed[1]
+    assert "pending_signal" not in shell_state.read(tmp_path / "shells", "tg")
+
+
+def test_signal_fire_with_advancing_clock_feeds_once_no_loop(tmp_path):
+    """Same re-arm-freeze regression as the pending_note case: one _fire call
+    must claim and feed the signal, not bail into an endless re-arm."""
+    clock = AdvancingClock()
+    host, _loop, fed = _host(tmp_path, clock)
+    shell_state.write(tmp_path / "shells", "tg", {"pending_signal": "battery low"})
+
+    asyncio.run(host._fire("tg"))
+
+    assert len(fed) == 1
+    assert "battery low" in fed[0]
+    assert "pending_signal" not in shell_state.read(tmp_path / "shells", "tg")
+    at, _cb = host._scheduler._table["tg"]
+    assert at > clock.t

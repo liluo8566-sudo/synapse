@@ -142,7 +142,8 @@ class TgConfig:
         "lie_down(rotate=True)"
     )
     # Why a round fired — its own line, right after shell_note_tag. Precedence
-    # directed > duty > alarm > idle. {at}/{last} render in [core].timezone.
+    # directed > signal > duty > alarm > idle. {at}/{last} render in
+    # [core].timezone.
     shell_source_directed: str = "[source: directed]"
     shell_source_duty: str = "[source: duty]"
     shell_source_alarm: str = "[source: alarm {at}]"
@@ -158,6 +159,13 @@ class TgConfig:
     shell_context_notify: bool = True
     shell_context_notify_start: int = 150000
     shell_context_notify_step: int = 50000
+    # Signal ear (T11): tail this file for new lines instead of the resident
+    # arming its own Monitor on it (30min cap -> a useless re-arm turn every
+    # cycle). Empty = off. expanduser'd at use time, not here.
+    shell_signal_log: str = ""
+    shell_signal_poll_s: float = 5.0
+    shell_signal_max_lines: int = 20
+    shell_source_signal: str = "[source: signal]"
 
     # /cwd presets from [cwd_presets] — display name -> absolute path
     cwd_presets: dict = field(default_factory=dict)
@@ -317,6 +325,8 @@ def load_config(path: Path | None = None) -> TgConfig:
             ("source_idle", "shell_source_idle"),
             ("source_idle_unknown", "shell_source_idle_unknown"),
             ("source_cancelled", "shell_source_cancelled"),
+            ("source_signal", "shell_source_signal"),
+            ("signal_log", "shell_signal_log"),
         ):
             v = cortex.get(key)
             if isinstance(v, str) and v.strip():
@@ -324,6 +334,12 @@ def load_config(path: Path | None = None) -> TgConfig:
         im = cortex.get("shell_idle_min")
         if isinstance(im, (int, float)) and not isinstance(im, bool) and im > 0:
             cfg.shell_idle_min = float(im)
+        sp = cortex.get("signal_poll_s")
+        if isinstance(sp, (int, float)) and not isinstance(sp, bool) and sp > 0:
+            cfg.shell_signal_poll_s = float(sp)
+        sm = cortex.get("signal_max_lines")
+        if isinstance(sm, int) and not isinstance(sm, bool) and sm > 0:
+            cfg.shell_signal_max_lines = sm
         rc = cortex.get("note_render_cmd")
         if isinstance(rc, list):
             cfg.shell_note_render_cmd = [str(x) for x in rc]

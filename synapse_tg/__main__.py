@@ -346,6 +346,9 @@ def main() -> int:
             loop.attach_shell(host)
             shell_box["task"] = application.create_task(host.run())
             logger.info("cortex shell host started (shell=%s)", cfg.shell_id)
+            if cfg.shell_signal_log:
+                application.job_queue.run_repeating(
+                    host.check_signal, interval=cfg.shell_signal_poll_s, first=5)
 
     async def _post_shutdown(application) -> None:
         loop.stop_listener()

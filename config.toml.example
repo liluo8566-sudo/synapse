@@ -87,6 +87,13 @@ fuse_tag = "⚙️ [FUSE]"
 context_notify = true
 context_notify_start = 150000
 context_notify_step = 50000
+# Signal ear: tail this file for new lines and feed them to the resident as
+# a normal round, instead of the resident arming its own Monitor on it.
+# Empty = off.
+# signal_log = "~/.config/marrow/cortex/wake_signal.log"
+# signal_poll_s = 5
+# signal_max_lines = 20
+# source_signal = "[source: signal]"
 
 # ── WeChat ────────────────────────────────────────────
 [user]
