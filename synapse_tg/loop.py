@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from telegram import Bot, Message, ReactionTypeEmoji, Update
-from telegram.error import NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes
 
 from synapse_core import bridge_state_store, heartbeat, last_active
@@ -47,6 +47,7 @@ from .media.inbound import (
 from .markdown import gfm_to_tg_html
 from .media.outbound import send_media
 from . import bark as _bark
+from . import effects
 from . import reactions
 from .shell import _tzinfo
 from .split import pack_for_tg, split_for_tg_typed
@@ -251,6 +252,16 @@ TG_REACTION_PROMPT = (
     "Only these emoji work: "
     + " ".join(reactions.ALLOWED_REACTION_EMOJI)
     + "."
+)
+
+
+TG_EFFECT_PROMPT = (
+    "Put <effect>EMOJI</effect> anywhere in a reply to add a full-screen "
+    "effect to the reply's first bubble when it's opened — private chats "
+    "only, one per reply, optional. Available: "
+    + " ".join(effects.EFFECT_IDS)
+    + ". A `spoiler` attribute on an <image>/<gif>/<video> tag blurs that "
+    "media until tapped — optional."
 )
 
 
@@ -551,7 +562,7 @@ class TgLoop:
                 channel="tg",
                 effort_level=state.effort_level,
                 stderr_log=Path.home() / "Library/Logs/synapse-tg-codex-stderr.log",
-                system_prompts=[BRIDGE_DELIVERY_PROMPT, QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, TG_REACTION_PROMPT],
+                system_prompts=[BRIDGE_DELIVERY_PROMPT, QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, TG_REACTION_PROMPT, TG_EFFECT_PROMPT],
             )
         return ClaudeCodeProvider(
             model=state.model,
@@ -562,7 +573,7 @@ class TgLoop:
             marrow_bridge=cfg.marrow_bridge,
             effort_level=state.effort_level,
             stderr_log=Path.home() / "Library/Logs/synapse-tg-cc-stderr.log",
-            system_prompts=[BRIDGE_DELIVERY_PROMPT, QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, TG_REACTION_PROMPT],
+            system_prompts=[BRIDGE_DELIVERY_PROMPT, QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, TG_REACTION_PROMPT, TG_EFFECT_PROMPT],
             system_prompt_files=cfg.system_prompt_files,
             idle_soft_s=cfg.idle_soft_s,
             idle_hard_s=cfg.idle_hard_s,
@@ -1550,6 +1561,26 @@ class TgLoop:
                 if cid is not None:
                     self._last_outbound[cid] = time.monotonic()
             return sent
+        except BadRequest as e:
+            if "message_effect_id" in send_kwargs:
+                logger.warning(
+                    "send_message BadRequest with effect, retrying without effect: %s", e
+                )
+                retry_kwargs = {k: v for k, v in send_kwargs.items() if k != "message_effect_id"}
+                try:
+                    sent = await _attempt(retry_kwargs)
+                    if sent is not None:
+                        cid = retry_kwargs.get("chat_id")
+                        if cid is not None:
+                            self._last_outbound[cid] = time.monotonic()
+                    return sent
+                except Exception as e2:
+                    logger.warning(
+                        "send_message failed after dropping effect, trying plain-text fallback: %s",
+                        e2,
+                    )
+            else:
+                logger.warning("send_message failed, trying plain-text fallback: %s", e)
         except Exception as e:
             logger.warning("send_message failed, trying plain-text fallback: %s", e)
         try:
@@ -1936,6 +1967,27 @@ class TgLoop:
         if react_tags:
             await self._apply_reactions(bot, chat_id, trigger_msg_id, react_tags)
 
+        # <effect> tag: private chat only, lands on the first outgoing reply
+        # bubble below (thinking bubbles never carry it). Only the first tag
+        # is used; extras are dropped with a warning.
+        response, effect_tags = effects.extract_effect_tags(response)
+        effect_id: str | None = None
+        if effect_tags:
+            if len(effect_tags) > 1:
+                logger.warning(
+                    "effect: reply had %d <effect> tags, using the first", len(effect_tags)
+                )
+            raw_emoji = effect_tags[0]
+            if chat_id < 0:
+                logger.info(
+                    "effect: dropped <effect>%s</effect> in group reply (private chat only)",
+                    raw_emoji,
+                )
+            else:
+                effect_id = effects.effect_id_for(raw_emoji)
+                if effect_id is None:
+                    logger.warning("effect: emoji not in whitelist (emoji=%r)", raw_emoji)
+
         # Thinking bubble: send before the early-return so silent turns still show it.
         # Sent from the ORIGINAL text immediately — translation (if configured)
         # happens afterward as a background edit, never blocking the turn.
@@ -1962,6 +2014,8 @@ class TgLoop:
                 task.add_done_callback(self._bg_tasks.discard)
 
         if not response:
+            if effect_tags:
+                logger.info("effect: reply was <effect> tag(s) only, nothing to send")
             return
 
         reply_to_id = None
@@ -1989,6 +2043,8 @@ class TgLoop:
                     send_kwargs["reply_to_message_id"] = reply_to_id
                     fallback_kwargs["reply_to_message_id"] = reply_to_id
                     reply_to_id = None
+                if idx == 0 and effect_id is not None:
+                    send_kwargs["message_effect_id"] = effect_id
                 sent = await self._send_text_bubble(bot, send_kwargs, fallback_kwargs)
                 if sent is not None:
                     self._record_sent(sent.message_id, "text", bubble["text"])
@@ -2016,6 +2072,7 @@ class TgLoop:
                 audio_path: str | None = None
                 if self._cfg.tts_effective_enabled():
                     audio_path = await _tts.synthesize(voice_text, self._cfg)
+                bubble_effect_id = effect_id if idx == 0 else None
                 if audio_path is not None:
                     try:
                         sent = await send_media(
@@ -2023,6 +2080,7 @@ class TgLoop:
                             reply_to=reply_to_id,
                             send_retry_max=self._cfg.send_retry_max,
                             retry_after_cap_sec=self._cfg.retry_after_cap_sec,
+                            effect_id=bubble_effect_id,
                         )
                         if sent is not None:
                             self._record_sent(sent.message_id, "voice", voice_text)
@@ -2038,6 +2096,8 @@ class TgLoop:
                     if reply_to_id is not None:
                         send_kwargs["reply_to_message_id"] = reply_to_id
                         fallback_kwargs["reply_to_message_id"] = reply_to_id
+                    if bubble_effect_id is not None:
+                        send_kwargs["message_effect_id"] = bubble_effect_id
                     sent = await self._send_text_bubble(bot, send_kwargs, fallback_kwargs)
                     if sent is not None:
                         self._record_sent(sent.message_id, "voice", voice_text)
@@ -2049,6 +2109,8 @@ class TgLoop:
                     reply_to=reply_to_id,
                     send_retry_max=self._cfg.send_retry_max,
                     retry_after_cap_sec=self._cfg.retry_after_cap_sec,
+                    spoiler=bubble.get("spoiler", False),
+                    effect_id=(effect_id if idx == 0 else None),
                 )
                 if sent is not None:
                     self._record_sent(sent.message_id, bubble["kind"])

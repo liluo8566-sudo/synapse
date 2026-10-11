@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 _MEDIA_TAG_RE = re.compile(
-    r'<(image|gif|video|file)\s+path="([^"]+)"\s*/?>',
+    r'<(image|gif|video|file)\s+path="([^"]+)"(\s+spoiler(?:="[^"]*")?)?\s*/?>',
     re.IGNORECASE,
 )
 
@@ -178,7 +178,7 @@ def split_for_tg_typed(
 
     Returns list of:
       {"kind": "text", "text": ...}
-      {"kind": "image"/"gif"/"video"/"file", "path": ...}
+      {"kind": "image"/"gif"/"video"/"file", "path": ..., "spoiler": True}
       {"kind": "voice", "text": ...}
     """
     if not text:
@@ -189,7 +189,10 @@ def split_for_tg_typed(
     # is still consumed (last_end advances past the tag) but no bubble is emitted.
     matches: list[tuple[int, int, dict | None]] = []
     for m in _MEDIA_TAG_RE.finditer(text):
-        matches.append((m.start(), m.end(), {"kind": m.group(1).lower(), "path": m.group(2)}))
+        bubble: dict = {"kind": m.group(1).lower(), "path": m.group(2)}
+        if m.group(3):
+            bubble["spoiler"] = True
+        matches.append((m.start(), m.end(), bubble))
     for m in _VOICE_TAG_RE.finditer(text):
         inner = m.group(1).strip()
         bubble = {"kind": "voice", "text": inner} if inner else None

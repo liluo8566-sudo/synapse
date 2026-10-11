@@ -28,9 +28,12 @@ import re
 
 _BUDDY_COMMENT = re.compile(r"<!--\s*buddy:.*?-->", re.DOTALL)
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
-# C1 media tags: <image|file|gif|video path="...">  (also accepts /> and single quotes)
+# C1 media tags: <image|file|gif|video path="...">  (also accepts /> and single
+# quotes, and an optional tg-only ` spoiler` / ` spoiler="..."` attribute —
+# wx has no spoiler concept, so it is just tolerated, not acted on)
 _MEDIA_TAG = re.compile(
-    r"""<\s*(?P<kind>image|file|gif|video)\s+path\s*=\s*['"](?P<path>[^'"]+)['"]\s*/?\s*>""",
+    r"""<\s*(?P<kind>image|file|gif|video)\s+path\s*=\s*['"](?P<path>[^'"]+)['"]"""
+    r"""(?:\s+spoiler(?:=['"][^'"]*['"])?)?\s*/?\s*>""",
     re.IGNORECASE,
 )
 _MEDIA_KINDS = {"image", "file", "gif", "video"}

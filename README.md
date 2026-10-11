@@ -47,6 +47,11 @@ Requires [marrow](https://github.com/Jaynechu/marrow) installed separately.
   sender's name); the tag is stripped before sending. Outbound `<react>`
   works in the private chat and in groups, and is unaffected by
   `reaction_events = false`.
+- Message effects and spoilers (private chat only, no config key): the model
+  puts `<effect>EMOJI</effect>` anywhere in a reply to add a full-screen
+  effect to the reply's first bubble (one per reply; available: 🔥 👍 👎 ❤️
+  🎉 💩). A `spoiler` attribute on an `<image>`/`<gif>`/`<video>` tag
+  (`<image path="..." spoiler/>`) blurs that media until tapped.
 
 ## Commands
 
