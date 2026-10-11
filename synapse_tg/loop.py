@@ -64,6 +64,11 @@ _MAX_CONSECUTIVE_DEATHS = 3
 _FLUSH_INTERVAL_SEC = 0.5
 # Extra seconds added on top of a 429 RetryAfter before retrying the send.
 _RETRY_AFTER_MARGIN_SEC = 0.5
+# _deliver_reply's trigger_msg_id sentinel: this flush's batch had no new
+# user message (e.g. only a reaction event) — a bare <react> has no default
+# target. Distinct from trigger_msg_id=None (caller didn't specify one;
+# falls back to the live _last_private_msg_id).
+NO_DEFAULT_REACT_TARGET = object()
 # Idle listener scheduling (internal, not user-varying): poll one line each
 # iteration; after releasing the lock, yield long enough for a pending
 # check_flush to win it (asyncio.Lock wakes waiters FIFO; the sleep guarantees
@@ -237,8 +242,10 @@ TG_REACTION_PROMPT = (
     "user message containing FRAGMENT; media are recorded as [photo] "
     "[sticker] [gif] [video] [file], so to=\"[sticker]\" hits the newest "
     "sticker. One reaction per message; a newer one replaces the older; "
-    "several tags may target different messages. Tags are stripped before "
-    "sending. Only these emoji work: "
+    "several tags may target different messages. If this batch has no new "
+    "user message (e.g. it is only a reaction event), a bare <react> has no "
+    "target and is dropped — use to=\"FRAGMENT\" to pick a message. Tags are "
+    "stripped before sending. Only these emoji work: "
     + " ".join(reactions.ALLOWED_REACTION_EMOJI)
     + "."
 )
@@ -326,6 +333,10 @@ class TgLoop:
         self._private_msgs: collections.OrderedDict[int, str] = collections.OrderedDict()
         self._sent_msgs: collections.OrderedDict[int, str] = collections.OrderedDict()
         self._last_private_msg_id: int | None = None
+        # _last_private_msg_id as of the last private flush — lets _flush_one
+        # tell "a new user message arrived in this batch" from "this batch is
+        # only a reaction event (or similar) on an unchanged pointer".
+        self._last_flushed_private_id: int | None = None
         # Routing: private messages use _buffer (accessed via _private_buffer
         # property); each group chat gets its own InboundBuffer so private and
         # group content never merge in one debounce window (bug 2) and routing
@@ -1545,7 +1556,7 @@ class TgLoop:
         self,
         bot: Bot,
         chat_id: int,
-        trigger_msg_id: int | None,
+        trigger_msg_id: int | None,  # or NO_DEFAULT_REACT_TARGET — see loop.py constant
         tags: list[reactions.ReactTag],
     ) -> None:
         """Apply <react> tags extracted from a reply. Private chat only —
@@ -1581,7 +1592,12 @@ class TgLoop:
                     return False
             return False
 
-        default_id = trigger_msg_id if trigger_msg_id is not None else self._last_private_msg_id
+        if trigger_msg_id is NO_DEFAULT_REACT_TARGET:
+            default_id = None  # bare <react> is unresolved below; to="..." still works
+        elif trigger_msg_id is not None:
+            default_id = trigger_msg_id
+        else:
+            default_id = self._last_private_msg_id
         for pending in reactions.resolve_reaction_targets(
             tags, default_msg_id=default_id, private_msgs=self._private_msgs
         ):
@@ -1625,6 +1641,13 @@ class TgLoop:
         # land on the last message of THIS batch, even if she sends another
         # message (updating _last_private_msg_id) while the turn is running.
         trigger_msg_id = self._last_private_msg_id
+        if buf is self._private_buffer:
+            # Unchanged since the last private flush -> this batch has no
+            # new user message (e.g. only a reaction event): no default
+            # target, so a bare <react> must not land on her last message.
+            if trigger_msg_id == self._last_flushed_private_id:
+                trigger_msg_id = NO_DEFAULT_REACT_TARGET
+            self._last_flushed_private_id = self._last_private_msg_id
 
         logger.info("flush: %r", body[:120])
         typing = TypingAction(bot, chat_id)
@@ -1870,7 +1893,7 @@ class TgLoop:
 
     async def _deliver_reply(
         self, bot: Bot, chat_id: int, response: str, thinking: str,
-        trigger_msg_id: int | None = None,
+        trigger_msg_id: int | None = None,  # or NO_DEFAULT_REACT_TARGET
     ) -> None:
         """Send one completed turn (thinking blockquote + quote-tag resolution
         + split + media + retry/fallback). Shared by the solicited reply path
@@ -1878,7 +1901,9 @@ class TgLoop:
 
         `trigger_msg_id`: default <react> target, snapshotted by the caller
         right after its inbound batch was taken. None (every caller except
-        _flush_one) falls back to the live _last_private_msg_id."""
+        _flush_one) falls back to the live _last_private_msg_id.
+        NO_DEFAULT_REACT_TARGET (_flush_one only): the batch had no new user
+        message — a bare <react> is unresolved; to="..." still works."""
         if not response and not thinking:
             return
         # HTML-comment silence protocol: strip all <!-- ... --> before delivering.

@@ -805,6 +805,73 @@ def test_flush_one_snapshots_trigger_before_turn_runs(tmp_path, monkeypatch):
     assert bot.reactions == [(777, 42, [ReactionTypeEmoji("❤")])]
 
 
+def _mock_turn(loop, monkeypatch, reply: str) -> None:
+    """Wire a _flush_one call through to a fixed reply, bypassing the real
+    provider/thread machinery."""
+    monkeypatch.setattr(loop, "ensure_provider", lambda: None)
+    loop._provider = type("P", (), {"session_id": None, "send": lambda self, b: None})()
+
+    async def fake_stream(bot_, chat_id, typing):
+        return reply, ""
+
+    monkeypatch.setattr(loop, "_stream_response", fake_stream)
+
+    async def _immediate(fn, *args):
+        return fn(*args)
+
+    monkeypatch.setattr("synapse_tg.loop.asyncio.to_thread", _immediate)
+
+
+def test_flush_reaction_only_batch_bare_react_dropped_to_still_resolves(tmp_path, monkeypatch):
+    """A batch with no new user message (e.g. only a reaction event) must
+    not give a bare <react> the stale default target — it would silently
+    replace whatever reaction she already placed on that old message.
+    to="..." fragment targeting is unaffected."""
+    loop = _owner_loop(tmp_path)
+    loop._last_private_msg_id = 100  # her last real message, unchanged this batch
+    loop._last_flushed_private_id = 100  # already accounted for in a prior flush
+    loop._private_msgs[100] = "pizza night"
+    loop._private_buffer.add('[reaction +❤] on their own message: "pizza night"')
+    bot = _ReactBot()
+    loop._bot = bot
+    _mock_turn(
+        loop, monkeypatch,
+        '<react>\U0001f525</react><react to="pizza">\U0001f44d</react>ok',
+    )
+
+    asyncio.run(loop._flush_one(bot, 777, loop._private_buffer))
+    # Only the to="pizza" reaction landed; the bare 🔥 tag was dropped.
+    assert bot.reactions == [(777, 100, [ReactionTypeEmoji("\U0001f44d")])]
+
+
+def test_flush_with_new_message_bare_react_lands_on_it(tmp_path, monkeypatch):
+    """The very next flush, once a real new message arrived, restores the
+    normal default-target behaviour."""
+    loop = _owner_loop(tmp_path)
+    loop._last_private_msg_id = 101  # a new message arrived since the last flush
+    loop._last_flushed_private_id = 100
+    loop._private_buffer.add("hello")
+    bot = _ReactBot()
+    loop._bot = bot
+    _mock_turn(loop, monkeypatch, "<react>\U0001f525</react>ok")
+
+    asyncio.run(loop._flush_one(bot, 777, loop._private_buffer))
+    assert bot.reactions == [(777, 101, [ReactionTypeEmoji("\U0001f525")])]
+
+
+def test_deliver_reply_non_flush_caller_unaffected_by_flush_tracker(tmp_path):
+    """feed_turn / _stream_response / _drain_unsolicited / boot_recovery call
+    _deliver_reply directly (no trigger_msg_id) — they must keep falling
+    back to the live _last_private_msg_id regardless of the private-flush
+    tracker's state (which only _flush_one consults)."""
+    loop = _owner_loop(tmp_path)
+    loop._last_private_msg_id = 777
+    loop._last_flushed_private_id = 777  # would read as "no new message" for a flush
+    bot = _ReactBot()
+    asyncio.run(loop._deliver_reply(bot, 777, "<react>❤</react>hi", ""))
+    assert bot.reactions == [(777, 777, [ReactionTypeEmoji("❤")])]
+
+
 # ── _translate_thinking_in_place: _sent_msgs bookkeeping ────────────────────
 
 
