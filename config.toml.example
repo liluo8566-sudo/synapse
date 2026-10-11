@@ -38,6 +38,11 @@ token = ""
 # group_meta_template = "[group:{title} from:{name}({uid})] "
 # private_meta_template = "[private:username] "
 
+# Emoji-reaction events (private chat only): when the user reacts to a
+# message, the model gets a "[reaction +X -Y] on ..." line. true = on (default).
+# Outbound <react> tags in replies are unaffected by this flag either way.
+# reaction_events = true
+
 
 # ── Cortex shell (tg) ─────────────────────────────────
 # Active iff shell_enabled AND shell_id below is a member of marrow's

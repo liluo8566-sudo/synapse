@@ -16,10 +16,10 @@ async def test_voice_calls_send_voice(tmp_path: Path) -> None:
     audio.write_bytes(b"fake-mp3")
 
     bot = MagicMock()
-    bot.send_voice = AsyncMock(return_value=None)
+    bot.send_voice = AsyncMock(return_value=MagicMock(message_id=1))
 
     ok = await send_media(bot, chat_id=1, kind="voice", path=str(audio))
-    assert ok is True
+    assert ok is not None
     assert bot.send_voice.call_count == 1
     call_kwargs = bot.send_voice.call_args.kwargs
     assert call_kwargs["chat_id"] == 1

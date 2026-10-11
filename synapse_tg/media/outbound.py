@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from telegram.error import RetryAfter
 
 if TYPE_CHECKING:
-    from telegram import Bot
+    from telegram import Bot, Message
 
 logger = logging.getLogger(__name__)
 
@@ -44,16 +44,17 @@ async def send_media(
     *,
     send_retry_max: int = 2,
     retry_after_cap_sec: float = 60.0,
-) -> bool:
-    """Send one media bubble. Returns True on success, False on failure.
+) -> Message | None:
+    """Send one media bubble. Returns the sent Message on success, None on
+    failure.
 
-    A False return lets the caller log and continue with remaining bubbles;
+    A None return lets the caller log and continue with remaining bubbles;
     media loss should not kill the text flow.
     """
     src = Path(path)
     if not src.exists():
         logger.error("send_media: file not found: %s", path)
-        return False
+        return None
 
     size = src.stat().st_size
     if size > TG_SEND_LIMIT:
@@ -69,27 +70,24 @@ async def send_media(
         if dims is not None and max(dims) < GIF_PHOTO_MAX_SIDE:
             gif_as_photo = True
 
-    async def _send_once() -> bool:
+    async def _send_once() -> Message | None:
         with open(path, "rb") as fh:
             if kind == "image":
-                await bot.send_photo(**kwargs, photo=fh)
-            elif kind == "gif":
+                return await bot.send_photo(**kwargs, photo=fh)
+            if kind == "gif":
                 if gif_as_photo:
-                    await bot.send_photo(**kwargs, photo=fh)
-                else:
-                    await bot.send_animation(**kwargs, animation=fh)
-            elif kind == "video":
-                await bot.send_video(**kwargs, video=fh)
-            elif kind == "file":
-                await bot.send_document(**kwargs, document=fh)
-            elif kind == "sticker":
-                await bot.send_sticker(**kwargs, sticker=fh)
-            elif kind == "voice":
-                await bot.send_voice(**kwargs, voice=fh)
-            else:
-                logger.error("send_media: unknown kind %r for path %s", kind, path)
-                return False
-        return True
+                    return await bot.send_photo(**kwargs, photo=fh)
+                return await bot.send_animation(**kwargs, animation=fh)
+            if kind == "video":
+                return await bot.send_video(**kwargs, video=fh)
+            if kind == "file":
+                return await bot.send_document(**kwargs, document=fh)
+            if kind == "sticker":
+                return await bot.send_sticker(**kwargs, sticker=fh)
+            if kind == "voice":
+                return await bot.send_voice(**kwargs, voice=fh)
+            logger.error("send_media: unknown kind %r for path %s", kind, path)
+            return None
 
     attempts = max(1, send_retry_max)
     for i in range(attempts):
@@ -101,9 +99,9 @@ async def send_media(
                 logger.error(
                     "send_media: RetryAfter %.1fs sending %s (%s); giving up", wait, path, kind
                 )
-                return False
+                return None
             await asyncio.sleep(wait + _RETRY_AFTER_MARGIN_SEC)
         except Exception as e:
             logger.error("send_media: TG API error sending %s (%s): %s", path, kind, e)
-            return False
-    return False
+            return None
+    return None

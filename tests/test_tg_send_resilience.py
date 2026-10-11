@@ -1,6 +1,6 @@
 """TG outbound resilience: 429 RetryAfter handling, wrapped fallback so a
-fallback failure can't kill the turn, media send returning bool, and config
-defaults."""
+fallback failure can't kill the turn, media send returning Message | None,
+and config defaults."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def test_retry_after_sleeps_stated_seconds_then_succeeds(tmp_path, no_real_sleep
     ok = asyncio.run(
         loop._send_text_bubble(bot, {"chat_id": 1, "text": "hi"}, {"chat_id": 1, "text": "hi"})
     )
-    assert ok is True
+    assert ok is not None
     assert calls["n"] == 2
     # slept exactly retry_after + margin
     assert no_real_sleep == [7 + 0.5]
@@ -102,7 +102,7 @@ def test_retry_after_over_cap_fails_immediately(tmp_path, no_real_sleep):
     ok = asyncio.run(
         loop._send_text_bubble(bot, {"chat_id": 1, "text": "hi"}, {"chat_id": 1, "text": "hi"})
     )
-    assert ok is False
+    assert ok is None
     assert no_real_sleep == []  # never waited
 
 
@@ -115,11 +115,11 @@ def test_fallback_raise_is_caught_returns_false(tmp_path):
 
     bot.send_message = send_message  # type: ignore[assignment]
 
-    # Must NOT raise; returns False.
+    # Must NOT raise; returns None.
     ok = asyncio.run(
         loop._send_text_bubble(bot, {"chat_id": 1, "text": "hi"}, {"chat_id": 1, "text": "hi"})
     )
-    assert ok is False
+    assert ok is None
 
 
 def test_fallback_recovers_when_primary_fails(tmp_path):
@@ -143,7 +143,7 @@ def test_fallback_recovers_when_primary_fails(tmp_path):
             {"chat_id": 1, "text": "hi"},
         )
     )
-    assert ok is True
+    assert ok is not None
     assert bot.sent == [{"chat_id": 1, "text": "hi"}]
 
 
@@ -154,7 +154,7 @@ def test_send_media_returns_true_on_success(tmp_path, no_real_sleep):
     f.write_bytes(b"x")
     bot = FakeBot()
     ok = asyncio.run(send_media(bot, 1, "image", str(f)))
-    assert ok is True
+    assert ok is not None
     assert bot.media and bot.media[0][0] == "photo"
 
 
@@ -168,13 +168,13 @@ def test_send_media_returns_false_on_failure(tmp_path, no_real_sleep):
 
     bot.send_photo = send_photo  # type: ignore[assignment]
     ok = asyncio.run(send_media(bot, 1, "image", str(f)))
-    assert ok is False
+    assert ok is None
 
 
 def test_send_media_missing_file_returns_false(tmp_path):
     bot = FakeBot()
     ok = asyncio.run(send_media(bot, 1, "image", str(tmp_path / "nope.jpg")))
-    assert ok is False
+    assert ok is None
 
 
 def test_send_media_retry_after_over_cap_fails(tmp_path, no_real_sleep):
@@ -187,7 +187,7 @@ def test_send_media_retry_after_over_cap_fails(tmp_path, no_real_sleep):
 
     bot.send_photo = send_photo  # type: ignore[assignment]
     ok = asyncio.run(send_media(bot, 1, "image", str(f), retry_after_cap_sec=60.0))
-    assert ok is False
+    assert ok is None
     assert no_real_sleep == []
 
 

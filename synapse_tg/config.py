@@ -100,6 +100,10 @@ class TgConfig:
     # Empty string = no prefix (default for private).
     group_meta_template: str = "[group:{title} from:{name}({uid})] "
     private_meta_template: str = ""
+    # Inbound emoji-reaction events (private chat only): she reacts to a
+    # message -> one event line on the private buffer. Outbound <react>
+    # tags are unaffected by this flag — they still apply when False.
+    reaction_events: bool = True
     # Empty = follow the OS timezone; set an IANA name to pin it.
     timezone: str = ""
 
@@ -306,6 +310,9 @@ def load_config(path: Path | None = None) -> TgConfig:
         pmt = tg.get("private_meta_template")
         if isinstance(pmt, str):
             cfg.private_meta_template = pmt
+        re_ev = tg.get("reaction_events")
+        if isinstance(re_ev, bool):
+            cfg.reaction_events = re_ev
 
     cortex = data.get("cortex") or {}
     if isinstance(cortex, dict):

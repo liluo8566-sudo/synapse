@@ -68,7 +68,7 @@ def test_small_gif_routes_to_send_photo(tmp_path: Path) -> None:
     bot = _make_bot()
     ok = asyncio.run(send_media(bot, 1, "gif", str(p)))
 
-    assert ok is True
+    assert ok is not None
     bot.send_photo.assert_called_once()
     bot.send_animation.assert_not_called()
 
@@ -82,7 +82,7 @@ def test_large_gif_routes_to_send_animation(tmp_path: Path) -> None:
     bot = _make_bot()
     ok = asyncio.run(send_media(bot, 1, "gif", str(p)))
 
-    assert ok is True
+    assert ok is not None
     bot.send_animation.assert_called_once()
     bot.send_photo.assert_not_called()
 
@@ -95,7 +95,7 @@ def test_corrupt_gif_falls_back_to_send_animation(tmp_path: Path) -> None:
     bot = _make_bot()
     ok = asyncio.run(send_media(bot, 1, "gif", str(p)))
 
-    assert ok is True
+    assert ok is not None
     bot.send_animation.assert_called_once()
     bot.send_photo.assert_not_called()
 

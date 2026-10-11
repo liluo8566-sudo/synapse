@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from telegram import Bot, Update
+from telegram import Bot, Message, ReactionTypeEmoji, Update
 from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes
 
@@ -47,6 +47,7 @@ from .media.inbound import (
 from .markdown import gfm_to_tg_html
 from .media.outbound import send_media
 from . import bark as _bark
+from . import reactions
 from .shell import _tzinfo
 from .split import pack_for_tg, split_for_tg_typed
 from . import tts as _tts
@@ -103,6 +104,16 @@ class _NullTyping:
 from synapse_core.text_filters import strip_html_comments  # noqa: E402
 
 
+def _private_prefix(private_template: str) -> str:
+    """Render the private-chat metadata prefix (no placeholders). A template
+    with unknown placeholders falls back to the raw string. Shared by
+    _chat_meta's private branch and the reaction event line."""
+    try:
+        return private_template.format()
+    except (KeyError, ValueError):
+        return private_template
+
+
 def _chat_meta(msg, group_template: str = "[group:{title} from:{name}({uid})] ", private_template: str = "") -> str:
     """Return a metadata prefix driven by config templates.
     Group: renders group_template with {title}/{name}/{uid}.
@@ -118,10 +129,33 @@ def _chat_meta(msg, group_template: str = "[group:{title} from:{name}({uid})] ",
             return group_template.format(title=title, name=name, uid=uid)
         except (KeyError, ValueError):
             return group_template
-    try:
-        return private_template.format()
-    except (KeyError, ValueError):
-        return private_template
+    return _private_prefix(private_template)
+
+
+def _inbound_summary(msg) -> str:
+    """Reaction-target summary for one inbound (her) private message, read
+    straight off the raw telegram.Message — text as-is, media as a tag
+    (reactions.inbound_media_summary) with any caption appended.
+
+    Uses getattr throughout: a real telegram.Message always has every one
+    of these attributes (None when absent), but lightweight test doubles
+    elsewhere in the suite only stub the ones they exercise."""
+    caption = (getattr(msg, "caption", None) or "").strip()
+    if getattr(msg, "photo", None):
+        return reactions.inbound_media_summary("photo", caption=caption)
+    sticker = getattr(msg, "sticker", None)
+    if sticker:
+        return reactions.inbound_media_summary("sticker", emoji=getattr(sticker, "emoji", None) or "")
+    if getattr(msg, "animation", None):
+        return reactions.inbound_media_summary("gif", caption=caption)
+    if getattr(msg, "video", None):
+        return reactions.inbound_media_summary("video", caption=caption)
+    document = getattr(msg, "document", None)
+    if document:
+        return reactions.inbound_media_summary(
+            "file", filename=getattr(document, "file_name", None) or "", caption=caption
+        )
+    return (getattr(msg, "text", None) or "").strip()
 
 
 def _passes_mention_gate(
@@ -190,6 +224,23 @@ TG_BUBBLE_FORMAT_PROMPT = (
     "- Prioritize readability. Match length to content — no filler.\n"
     "- Do not read or edit code unless explicitly asked.\n"
     "- Free to search docs and web."
+)
+
+
+TG_REACTION_PROMPT = (
+    "Emoji reactions (Telegram private chat only). When the user reacts you "
+    "get a line like '[reaction +❤ -\U0001f44d] on your message: \"...\"' "
+    "(+ added, - removed); reply, react back, or stay silent as you see fit. "
+    "To react to the user's messages put <react>EMOJI</react> anywhere in "
+    "your reply: it lands on the user's last message in the batch you are "
+    "answering. <react to=\"FRAGMENT\">EMOJI</react> lands on the newest "
+    "user message containing FRAGMENT; media are recorded as [photo] "
+    "[sticker] [gif] [video] [file], so to=\"[sticker]\" hits the newest "
+    "sticker. One reaction per message; a newer one replaces the older; "
+    "several tags may target different messages. Tags are stripped before "
+    "sending. Only these emoji work: "
+    + " ".join(reactions.ALLOWED_REACTION_EMOJI)
+    + "."
 )
 
 
@@ -269,6 +320,12 @@ class TgLoop:
             )
         self._user_initiated_close = False
         self._msg_id_cache: collections.OrderedDict[int, str] = collections.OrderedDict()
+        # Reactions (private chat only): her messages (id -> summary, cap
+        # 200), our sent messages (id -> summary, cap 300), and the id of her
+        # last private message — the default <react> target.
+        self._private_msgs: collections.OrderedDict[int, str] = collections.OrderedDict()
+        self._sent_msgs: collections.OrderedDict[int, str] = collections.OrderedDict()
+        self._last_private_msg_id: int | None = None
         # Routing: private messages use _buffer (accessed via _private_buffer
         # property); each group chat gets its own InboundBuffer so private and
         # group content never merge in one debounce window (bug 2) and routing
@@ -475,7 +532,7 @@ class TgLoop:
                 channel="tg",
                 effort_level=state.effort_level,
                 stderr_log=Path.home() / "Library/Logs/synapse-tg-codex-stderr.log",
-                system_prompts=[BRIDGE_DELIVERY_PROMPT, QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT],
+                system_prompts=[BRIDGE_DELIVERY_PROMPT, QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, TG_REACTION_PROMPT],
             )
         return ClaudeCodeProvider(
             model=state.model,
@@ -486,7 +543,7 @@ class TgLoop:
             marrow_bridge=cfg.marrow_bridge,
             effort_level=state.effort_level,
             stderr_log=Path.home() / "Library/Logs/synapse-tg-cc-stderr.log",
-            system_prompts=[BRIDGE_DELIVERY_PROMPT, QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT],
+            system_prompts=[BRIDGE_DELIVERY_PROMPT, QUOTE_SYSTEM_PROMPT, MEDIA_SYSTEM_PROMPT, TG_BUBBLE_FORMAT_PROMPT, SILENCE_SYSTEM_PROMPT, NIGHT_SYSTEM_PROMPT, TG_REACTION_PROMPT],
             system_prompt_files=cfg.system_prompt_files,
             idle_soft_s=cfg.idle_soft_s,
             idle_hard_s=cfg.idle_hard_s,
@@ -1132,7 +1189,7 @@ class TgLoop:
 
 
     def _track(self, bot: Bot, chat_id: int, count_activity: bool = True,
-               is_group: bool = False) -> None:
+               is_group: bool = False, msg=None) -> None:
         self._bot = bot
         # Group messages must not rebind the private reply target so that
         # unsolicited output (heartbeat, idle drain) keeps going to the private
@@ -1143,6 +1200,17 @@ class TgLoop:
             if self._state.chat_id != chat_id:
                 self._state.chat_id = chat_id
                 self._persist_state()
+        # Reaction target tracking: private only (never a group message_id —
+        # it would collide with a same-numbered private message). Recorded
+        # even when count_activity is False (a slash command still exists
+        # as a message to react to), but it only becomes the default
+        # <react> target when it actually reached the LLM.
+        if msg is not None and not is_group:
+            self._private_msgs[msg.message_id] = _inbound_summary(msg)
+            if len(self._private_msgs) > 200:
+                self._private_msgs.popitem(last=False)
+            if count_activity:
+                self._last_private_msg_id = msg.message_id
         # An inbound message restarts the cortex shell's silence cycle and
         # cancels a booked wake only when it actually reaches the LLM. Text
         # turns count a "forward" verdict or an injected rewrite; anything the
@@ -1259,7 +1327,7 @@ class TgLoop:
             inject = self._registry.pending_rewrite
         self._track(context.bot, msg.chat_id,
                      count_activity=(action == "forward" or bool(inject)),
-                     is_group=is_group)
+                     is_group=is_group, msg=msg)
 
         if action == "handled":
             if self._queued_extra_bubbles:
@@ -1310,7 +1378,7 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        self._track(context.bot, msg.chat_id, is_group=is_group)
+        self._track(context.bot, msg.chat_id, is_group=is_group, msg=msg)
         paths = await materialize_photo(context.bot, msg, self._cfg.data_dir)
         if paths:
             instruction = build_read_instruction(paths)
@@ -1327,7 +1395,7 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        self._track(context.bot, msg.chat_id, is_group=is_group)
+        self._track(context.bot, msg.chat_id, is_group=is_group, msg=msg)
         path = await materialize_animation(context.bot, msg, self._cfg.data_dir)
         if path:
             instruction = build_read_instruction([path])
@@ -1344,7 +1412,7 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        self._track(context.bot, msg.chat_id, is_group=is_group)
+        self._track(context.bot, msg.chat_id, is_group=is_group, msg=msg)
         path = await materialize_document(context.bot, msg, self._cfg.data_dir)
         if path:
             instruction = build_read_instruction([path])
@@ -1361,7 +1429,7 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        self._track(context.bot, msg.chat_id, is_group=is_group)
+        self._track(context.bot, msg.chat_id, is_group=is_group, msg=msg)
         path = await materialize_sticker(context.bot, msg, self._cfg.data_dir)
         if path:
             stk = msg.sticker
@@ -1378,7 +1446,7 @@ class TgLoop:
         is_group = msg.chat.type in ("group", "supergroup")
         if is_group and not self._check_group_gate(msg):
             return
-        self._track(context.bot, msg.chat_id, is_group=is_group)
+        self._track(context.bot, msg.chat_id, is_group=is_group, msg=msg)
         path = await materialize_video(context.bot, msg, self._cfg.data_dir)
         if path:
             instruction = build_read_instruction([path])
@@ -1388,45 +1456,147 @@ class TgLoop:
             self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered video: %s", path)
 
-    async def _send_text_bubble(self, bot: Bot, send_kwargs: dict, fallback_kwargs: dict) -> bool:
+    async def on_reaction(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Private-chat-only: she added/removed/swapped a reaction on some
+        message. Turns it into one event line on the private buffer so the
+        model decides whether to reply, react back, or stay silent."""
+        if self._bot is None:
+            self._bot = context.bot
+        if not self._cfg.reaction_events:
+            return
+        mr = update.message_reaction
+        if mr is None:
+            return
+        if mr.chat.type != "private":
+            return
+        user = mr.user
+        if user is None or getattr(user, "is_bot", False):
+            return
+        if not self._is_owner(user.id):
+            return
+        # A reaction reaches the LLM like a message does: bind routing and
+        # restart the shell's silence cycle. No msg= — must not touch
+        # _last_private_msg_id (that stays the last typed/media message).
+        self._track(context.bot, mr.chat.id)
+        added, removed = reactions.diff_reactions(mr.old_reaction, mr.new_reaction)
+        if not added and not removed:
+            return
+        msg_id = mr.message_id
+        if msg_id in self._sent_msgs:
+            on, summary = "mine", self._sent_msgs[msg_id]
+        elif msg_id in self._private_msgs:
+            on, summary = "theirs", self._private_msgs[msg_id]
+        else:
+            on, summary = "unknown", None
+        prefix = _private_prefix(self._cfg.private_meta_template)
+        line = reactions.format_reaction_event(prefix, added, removed, on=on, summary=summary)
+        self._private_buffer.add(line)
+        logger.info("reaction inbound: message_id=%s +%s -%s", msg_id, added, removed)
+
+    async def _send_text_bubble(
+        self, bot: Bot, send_kwargs: dict, fallback_kwargs: dict
+    ) -> Message | None:
         """Send one text bubble with 429 RetryAfter handling and a plain-text
-        fallback. Returns True on success, False if the bubble was lost.
+        fallback. Returns the sent Message on success, None if the bubble
+        was lost.
 
         Never raises: a fallback failure is caught so it cannot kill the turn.
         """
 
-        async def _attempt(kwargs: dict) -> bool:
+        async def _attempt(kwargs: dict) -> Message | None:
             attempts = max(1, self._cfg.send_retry_max)
             for i in range(attempts):
                 try:
-                    await bot.send_message(**kwargs)
-                    return True
+                    return await bot.send_message(**kwargs)
                 except RetryAfter as e:
                     wait = float(getattr(e, "retry_after", 0)) or 0.0
                     if wait > self._cfg.retry_after_cap_sec or i == attempts - 1:
                         raise
                     await asyncio.sleep(wait + _RETRY_AFTER_MARGIN_SEC)
-            return False
+            return None
 
         try:
-            ok = await _attempt(send_kwargs)
-            if ok:
+            sent = await _attempt(send_kwargs)
+            if sent is not None:
                 cid = send_kwargs.get("chat_id")
                 if cid is not None:
                     self._last_outbound[cid] = time.monotonic()
-            return ok
+            return sent
         except Exception as e:
             logger.warning("send_message failed, trying plain-text fallback: %s", e)
         try:
-            ok = await _attempt(fallback_kwargs)
-            if ok:
+            sent = await _attempt(fallback_kwargs)
+            if sent is not None:
                 cid = fallback_kwargs.get("chat_id")
                 if cid is not None:
                     self._last_outbound[cid] = time.monotonic()
-            return ok
+            return sent
         except Exception as e:
             logger.warning("plain-text fallback send also failed: %s", e)
+            return None
+
+    def _record_sent(self, message_id: int, kind: str, text: str = "") -> None:
+        """Remember one message we just sent as a reaction target."""
+        self._sent_msgs[message_id] = reactions.outbound_sent_summary(kind, text)
+        if len(self._sent_msgs) > 300:
+            self._sent_msgs.popitem(last=False)
+
+    async def _apply_reactions(
+        self,
+        bot: Bot,
+        chat_id: int,
+        trigger_msg_id: int | None,
+        tags: list[reactions.ReactTag],
+    ) -> None:
+        """Apply <react> tags extracted from a reply. Private chat only —
+        Telegram group/supergroup/channel chat ids are always negative; a
+        positive chat_id is a private chat (it equals the user's own id)."""
+        if chat_id < 0:
+            logger.warning(
+                "react: %d tag(s) dropped — reply target is a group chat (chat_id=%s)",
+                len(tags), chat_id,
+            )
+            return
+
+        async def _set_one(target: int, emoji: str) -> bool:
+            attempts = max(1, self._cfg.send_retry_max)
+            for i in range(attempts):
+                try:
+                    await bot.set_message_reaction(chat_id, target, [ReactionTypeEmoji(emoji)])
+                    return True
+                except RetryAfter as e:
+                    wait = float(getattr(e, "retry_after", 0)) or 0.0
+                    if wait > self._cfg.retry_after_cap_sec or i == attempts - 1:
+                        logger.warning(
+                            "react: RetryAfter %.1fs setting reaction (chat_id=%s, message_id=%s); giving up",
+                            wait, chat_id, target,
+                        )
+                        return False
+                    await asyncio.sleep(wait + _RETRY_AFTER_MARGIN_SEC)
+                except Exception as e:
+                    logger.warning(
+                        "react: set_message_reaction failed (chat_id=%s, message_id=%s, emoji=%s): %s",
+                        chat_id, target, emoji, e,
+                    )
+                    return False
             return False
+
+        default_id = trigger_msg_id if trigger_msg_id is not None else self._last_private_msg_id
+        for pending in reactions.resolve_reaction_targets(
+            tags, default_msg_id=default_id, private_msgs=self._private_msgs
+        ):
+            if pending.target is None:
+                logger.warning(
+                    "react: no target message for tag (to=%r, emoji=%r)",
+                    pending.to, pending.emoji,
+                )
+                continue
+            emoji = reactions.normalize_emoji(pending.emoji)
+            if emoji is None:
+                logger.warning("react: emoji not in whitelist (emoji=%r)", pending.emoji)
+                continue
+            if await _set_one(pending.target, emoji):
+                logger.info("react: set %s on message %s (chat_id=%s)", emoji, pending.target, chat_id)
 
     def _set_inflight(self, chat_id: int, body: str) -> None:
         """Persist an in-flight marker before handing the turn to the provider."""
@@ -1451,6 +1621,10 @@ class TgLoop:
         body = buf.flush()
         if not body:
             return
+        # Snapshot now: a default-target <react> in this turn's reply must
+        # land on the last message of THIS batch, even if she sends another
+        # message (updating _last_private_msg_id) while the turn is running.
+        trigger_msg_id = self._last_private_msg_id
 
         logger.info("flush: %r", body[:120])
         typing = TypingAction(bot, chat_id)
@@ -1509,7 +1683,7 @@ class TgLoop:
             ):
                 await self._send_provider_notice(bot, chat_id, "provider.turn_capped")
 
-            await self._deliver_reply(bot, chat_id, response, thinking)
+            await self._deliver_reply(bot, chat_id, response, thinking, trigger_msg_id=trigger_msg_id)
             self._clear_inflight()
         finally:
             self._notice_defer -= 1
@@ -1672,18 +1846,21 @@ class TgLoop:
                 await bot.edit_message_text(
                     chat_id=chat_id, message_id=sent_ids[i], text=html, parse_mode="HTML"
                 )
+                self._record_sent(sent_ids[i], "thinking", new_bubbles[i])
             except Exception as e:
                 logger.warning("thinking edit failed (bubble %d/%d): %s", i + 1, n, e)
         for extra_id in sent_ids[shared:]:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=extra_id)
+                self._sent_msgs.pop(extra_id, None)
             except Exception as e:
                 logger.warning("thinking delete failed (message_id %s): %s", extra_id, e)
         for i in range(shared, n):
             prefix = f"\U0001f4ad ({i + 1}/{n})\n"
             html = _think_html(prefix, new_bubbles[i])
             try:
-                await bot.send_message(chat_id=chat_id, text=html, parse_mode="HTML")
+                msg = await bot.send_message(chat_id=chat_id, text=html, parse_mode="HTML")
+                self._record_sent(msg.message_id, "thinking", new_bubbles[i])
             except Exception as e:
                 logger.warning("thinking send failed (bubble %d/%d): %s", i + 1, n, e)
         logger.info(
@@ -1692,15 +1869,26 @@ class TgLoop:
         )
 
     async def _deliver_reply(
-        self, bot: Bot, chat_id: int, response: str, thinking: str
+        self, bot: Bot, chat_id: int, response: str, thinking: str,
+        trigger_msg_id: int | None = None,
     ) -> None:
         """Send one completed turn (thinking blockquote + quote-tag resolution
         + split + media + retry/fallback). Shared by the solicited reply path
-        and unsolicited (background-task) turns so both deliver identically."""
+        and unsolicited (background-task) turns so both deliver identically.
+
+        `trigger_msg_id`: default <react> target, snapshotted by the caller
+        right after its inbound batch was taken. None (every caller except
+        _flush_one) falls back to the live _last_private_msg_id."""
         if not response and not thinking:
             return
         # HTML-comment silence protocol: strip all <!-- ... --> before delivering.
         response = strip_html_comments(response)
+
+        # <react> tags: stripped after silence-comments, before <quote> —
+        # and applied before any bubble (thinking or text) ships below.
+        response, react_tags = reactions.extract_react_tags(response)
+        if react_tags:
+            await self._apply_reactions(bot, chat_id, trigger_msg_id, react_tags)
 
         # Thinking bubble: send before the early-return so silent turns still show it.
         # Sent from the ORIGINAL text immediately — translation (if configured)
@@ -1715,6 +1903,7 @@ class TgLoop:
                 try:
                     msg = await bot.send_message(chat_id=chat_id, text=think_html, parse_mode="HTML")
                     sent_ids.append(msg.message_id)
+                    self._record_sent(msg.message_id, "thinking", bubble_text)
                 except Exception as e:
                     logger.warning("thinking send failed (bubble %d/%d): %s", i, n, e)
                     break
@@ -1754,8 +1943,10 @@ class TgLoop:
                     send_kwargs["reply_to_message_id"] = reply_to_id
                     fallback_kwargs["reply_to_message_id"] = reply_to_id
                     reply_to_id = None
-                ok = await self._send_text_bubble(bot, send_kwargs, fallback_kwargs)
-                if not ok:
+                sent = await self._send_text_bubble(bot, send_kwargs, fallback_kwargs)
+                if sent is not None:
+                    self._record_sent(sent.message_id, "text", bubble["text"])
+                else:
                     lost = total - idx
                     logger.warning(
                         "send_message failed at bubble %d/%d — %d bubble(s) of the turn stopped",
@@ -1781,12 +1972,14 @@ class TgLoop:
                     audio_path = await _tts.synthesize(voice_text, self._cfg)
                 if audio_path is not None:
                     try:
-                        await send_media(
+                        sent = await send_media(
                             bot, chat_id, "voice", audio_path,
                             reply_to=reply_to_id,
                             send_retry_max=self._cfg.send_retry_max,
                             retry_after_cap_sec=self._cfg.retry_after_cap_sec,
                         )
+                        if sent is not None:
+                            self._record_sent(sent.message_id, "voice", voice_text)
                     finally:
                         try:
                             import os as _os
@@ -1799,17 +1992,21 @@ class TgLoop:
                     if reply_to_id is not None:
                         send_kwargs["reply_to_message_id"] = reply_to_id
                         fallback_kwargs["reply_to_message_id"] = reply_to_id
-                    await self._send_text_bubble(bot, send_kwargs, fallback_kwargs)
+                    sent = await self._send_text_bubble(bot, send_kwargs, fallback_kwargs)
+                    if sent is not None:
+                        self._record_sent(sent.message_id, "voice", voice_text)
                 if reply_to_id is not None:
                     reply_to_id = None
             else:
-                ok = await send_media(
+                sent = await send_media(
                     bot, chat_id, bubble["kind"], bubble["path"],
                     reply_to=reply_to_id,
                     send_retry_max=self._cfg.send_retry_max,
                     retry_after_cap_sec=self._cfg.retry_after_cap_sec,
                 )
-                if not ok:
+                if sent is not None:
+                    self._record_sent(sent.message_id, bubble["kind"])
+                else:
                     logger.warning(
                         "send_media failed for bubble %d/%d (%s) — continuing",
                         idx + 1, total, bubble["kind"],

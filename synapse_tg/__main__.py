@@ -9,8 +9,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from telegram import Update
 from telegram.error import NetworkError, TimedOut
-from telegram.ext import Application, MessageHandler, filters
+from telegram.ext import Application, MessageHandler, MessageReactionHandler, filters
 from telegram.request import HTTPXRequest
 
 from synapse_core import marrow_session, transcript_recover
@@ -384,6 +385,14 @@ def main() -> int:
     app.add_handler(MessageHandler(_gated(filters.Document.ALL), loop.on_document))
     app.add_handler(MessageHandler(_gated(filters.Sticker.ALL), loop.on_sticker))
     app.add_handler(MessageHandler(_gated(filters.VIDEO), loop.on_video))
+    # Filtered inside on_reaction (private + owner only) — anonymous count
+    # updates (no .user/.old_reaction) are excluded at the handler level.
+    app.add_handler(
+        MessageReactionHandler(
+            loop.on_reaction,
+            message_reaction_types=MessageReactionHandler.MESSAGE_REACTION_UPDATED,
+        )
+    )
     app.job_queue.run_repeating(loop.check_flush, interval=0.5, first=0.5)
     app.job_queue.run_repeating(loop.check_heartbeat, interval=15, first=10)
     app.job_queue.run_repeating(loop.check_qidu_signal, interval=cfg.qidu_signal_poll_interval, first=5)
@@ -414,7 +423,9 @@ def main() -> int:
 
     logger.info("synapse-tg starting (long-poll)")
     try:
-        app.run_polling()
+        # ALL_TYPES (superset of the previous default) so message_reaction
+        # updates are delivered — Telegram otherwise omits them.
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
     finally:
         if qidu_parser:
             qidu_parser.stop()
