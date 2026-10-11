@@ -13,7 +13,6 @@ from telegram.error import RetryAfter
 from synapse_tg import reactions
 from synapse_tg.config import TgConfig
 from synapse_tg.loop import TgLoop
-from synapse_tg.split import split_for_tg_typed as _real_split_for_tg_typed
 
 # ── emoji normalisation ────────────────────────────────────────────────────
 
@@ -805,12 +804,7 @@ def _patch_fake_send_media(monkeypatch, *, fail_on: set[str] | None = None):
     """Replace synapse_tg.loop.send_media with a stub that never touches a
     real bot or filesystem. Returns the list of (kind, path) it was called
     with, in call order. `fail_on` is a set of paths that return None (as a
-    real send failure would) instead of a sent message.
-
-    Also re-pins synapse_tg.loop.split_for_tg_typed to the real function:
-    test_tg_idle_listener.py's monkeypatch_split() replaces it with a raw
-    module-attribute assignment (not monkeypatch.setattr), so depending on
-    full-suite run order that stub can still be in place here otherwise."""
+    real send failure would) instead of a sent message."""
     fail_on = fail_on or set()
     calls: list[tuple[str, str]] = []
 
@@ -821,7 +815,6 @@ def _patch_fake_send_media(monkeypatch, *, fail_on: set[str] | None = None):
         return types.SimpleNamespace(message_id=1000 + len(calls))
 
     monkeypatch.setattr("synapse_tg.loop.send_media", fake_send_media)
-    monkeypatch.setattr("synapse_tg.loop.split_for_tg_typed", _real_split_for_tg_typed)
     return calls
 
 
