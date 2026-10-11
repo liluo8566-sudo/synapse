@@ -239,6 +239,9 @@ TG_REACTION_PROMPT = (
     "'[reaction +❤ -\U0001f44d] on your message: \"...\"' (+ added, - "
     "removed); reply, react back, or stay silent as you see fit — groups "
     "never send this event line, even when someone reacts. "
+    "Your own media in that line are numbered per reply and carry the file "
+    "name — '[image 2] cat.png' is the second <image> of the reply that "
+    "sent it. "
     "To react back, put <react>EMOJI</react> anywhere in your reply: it "
     "lands on the last message of the batch you are answering, in that "
     "chat. <react to=\"FRAGMENT\">EMOJI</react> lands on the newest message "
@@ -1594,9 +1597,11 @@ class TgLoop:
             logger.warning("plain-text fallback send also failed: %s", e)
             return None
 
-    def _record_sent(self, message_id: int, kind: str, text: str = "") -> None:
+    def _record_sent(
+        self, message_id: int, kind: str, text: str = "", seq: int | None = None
+    ) -> None:
         """Remember one message we just sent as a reaction target."""
-        self._sent_msgs[message_id] = reactions.outbound_sent_summary(kind, text)
+        self._sent_msgs[message_id] = reactions.outbound_sent_summary(kind, text, seq=seq)
         if len(self._sent_msgs) > 300:
             self._sent_msgs.popitem(last=False)
 
@@ -2031,6 +2036,7 @@ class TgLoop:
         bubbles = split_for_tg_typed(response)
 
         total = len(bubbles)
+        media_seq: collections.Counter[str] = collections.Counter()
         for idx, bubble in enumerate(bubbles):
             if bubble["kind"] == "text":
                 send_kwargs = dict(
@@ -2104,6 +2110,11 @@ class TgLoop:
                 if reply_to_id is not None:
                     reply_to_id = None
             else:
+                # Count this media's number before sending — a failed send
+                # still uses up its slot, so later numbers keep matching the
+                # order of the tags in the reply.
+                media_seq[bubble["kind"]] += 1
+                seq = media_seq[bubble["kind"]]
                 sent = await send_media(
                     bot, chat_id, bubble["kind"], bubble["path"],
                     reply_to=reply_to_id,
@@ -2113,7 +2124,9 @@ class TgLoop:
                     effect_id=(effect_id if idx == 0 else None),
                 )
                 if sent is not None:
-                    self._record_sent(sent.message_id, bubble["kind"])
+                    self._record_sent(
+                        sent.message_id, bubble["kind"], os.path.basename(bubble["path"]), seq=seq
+                    )
                 else:
                     logger.warning(
                         "send_media failed for bubble %d/%d (%s) — continuing",

@@ -13,6 +13,7 @@ from telegram.error import RetryAfter
 from synapse_tg import reactions
 from synapse_tg.config import TgConfig
 from synapse_tg.loop import TgLoop
+from synapse_tg.split import split_for_tg_typed as _real_split_for_tg_typed
 
 # ── emoji normalisation ────────────────────────────────────────────────────
 
@@ -327,6 +328,26 @@ def test_outbound_summary_media_kinds_no_text():
     assert reactions.outbound_sent_summary("gif") == "[gif]"
     assert reactions.outbound_sent_summary("video") == "[video]"
     assert reactions.outbound_sent_summary("file") == "[file]"
+
+
+def test_outbound_summary_media_with_seq_and_filename():
+    out = reactions.outbound_sent_summary("image", "a.png", seq=2)
+    assert out == "[image 2] a.png"
+
+
+def test_outbound_summary_media_with_seq_empty_filename():
+    out = reactions.outbound_sent_summary("gif", "", seq=1)
+    assert out == "[gif 1]"
+
+
+def test_outbound_summary_media_no_seq_unchanged():
+    assert reactions.outbound_sent_summary("image") == "[image]"
+
+
+def test_outbound_summary_media_filename_truncates_60():
+    name = "a" * 100
+    out = reactions.outbound_sent_summary("image", name, seq=3)
+    assert out == "[image 3] " + "a" * 60
 
 
 # =============================================================================
@@ -775,6 +796,84 @@ def test_deliver_reply_no_trigger_falls_back_to_live_last_private_msg_id(tmp_pat
     bot = _ReactBot()
     asyncio.run(loop._deliver_reply(bot, 777, "<react>❤</react>hi", ""))
     assert bot.reactions == [(777, 777, [ReactionTypeEmoji("❤")])]
+
+
+# ── _deliver_reply: media numbering (mocked send_media) ─────────────────────
+
+
+def _patch_fake_send_media(monkeypatch, *, fail_on: set[str] | None = None):
+    """Replace synapse_tg.loop.send_media with a stub that never touches a
+    real bot or filesystem. Returns the list of (kind, path) it was called
+    with, in call order. `fail_on` is a set of paths that return None (as a
+    real send failure would) instead of a sent message.
+
+    Also re-pins synapse_tg.loop.split_for_tg_typed to the real function:
+    test_tg_idle_listener.py's monkeypatch_split() replaces it with a raw
+    module-attribute assignment (not monkeypatch.setattr), so depending on
+    full-suite run order that stub can still be in place here otherwise."""
+    fail_on = fail_on or set()
+    calls: list[tuple[str, str]] = []
+
+    async def fake_send_media(bot, chat_id, kind, path, **kwargs):
+        calls.append((kind, path))
+        if path in fail_on:
+            return None
+        return types.SimpleNamespace(message_id=1000 + len(calls))
+
+    monkeypatch.setattr("synapse_tg.loop.send_media", fake_send_media)
+    monkeypatch.setattr("synapse_tg.loop.split_for_tg_typed", _real_split_for_tg_typed)
+    return calls
+
+
+def test_deliver_reply_media_numbered_per_kind_in_send_order(tmp_path, monkeypatch):
+    _patch_fake_send_media(monkeypatch)
+    loop = _owner_loop(tmp_path)
+    bot = _FakeBot()
+    response = '<image path="/tmp/a.png"><gif path="/tmp/s.gif"><image path="/tmp/b.png">'
+    asyncio.run(loop._deliver_reply(bot, 777, response, ""))
+    assert list(loop._sent_msgs.values()) == [
+        "[image 1] a.png",
+        "[gif 1] s.gif",
+        "[image 2] b.png",
+    ]
+
+
+def test_deliver_reply_media_numbering_restarts_each_call(tmp_path, monkeypatch):
+    _patch_fake_send_media(monkeypatch)
+    loop = _owner_loop(tmp_path)
+    bot = _FakeBot()
+    asyncio.run(loop._deliver_reply(bot, 777, '<image path="/tmp/a.png">', ""))
+    asyncio.run(loop._deliver_reply(bot, 777, '<image path="/tmp/b.png">', ""))
+    assert list(loop._sent_msgs.values()) == ["[image 1] a.png", "[image 1] b.png"]
+
+
+def test_deliver_reply_media_failed_send_still_consumes_its_number(tmp_path, monkeypatch):
+    """First image's send fails (send_media returns None) — nothing recorded
+    for it, and the next image keeps the number its tag position implies."""
+    calls = _patch_fake_send_media(monkeypatch, fail_on={"/tmp/a.png"})
+    loop = _owner_loop(tmp_path)
+    bot = _FakeBot()
+    response = '<image path="/tmp/a.png"><image path="/tmp/b.png">'
+    asyncio.run(loop._deliver_reply(bot, 777, response, ""))
+    assert calls == [("image", "/tmp/a.png"), ("image", "/tmp/b.png")]
+    assert list(loop._sent_msgs.values()) == ["[image 2] b.png"]
+
+
+def test_deliver_reply_media_reaction_event_line_quotes_numbered_summary(tmp_path, monkeypatch):
+    """An inbound reaction on the 2nd of 2 images sent in one reply quotes
+    the numbered summary, not a bare '[image]'."""
+    _patch_fake_send_media(monkeypatch)
+    loop = _owner_loop(tmp_path)
+    bot = _FakeBot()
+    response = '<image path="/tmp/a.png"><image path="/tmp/b.png">'
+    asyncio.run(loop._deliver_reply(bot, 777, response, ""))
+    second_image_id = list(loop._sent_msgs.keys())[-1]
+    assert loop._sent_msgs[second_image_id] == "[image 2] b.png"
+
+    update = _reaction_update(message_id=second_image_id, new=[_new_heart()])
+    asyncio.run(loop.on_reaction(update, _FakeCtx(_FakeBot())))
+    body = loop._private_buffer.flush()
+    assert 'on your message: "[image 2] b.png"' in body
 
 
 def test_flush_one_snapshots_trigger_before_turn_runs(tmp_path, monkeypatch):

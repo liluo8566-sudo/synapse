@@ -164,11 +164,14 @@ def inbound_media_summary(kind: str, *, emoji: str = "", filename: str = "", cap
     return f"{tag} {caption}" if caption else tag
 
 
-def outbound_sent_summary(kind: str, text: str = "") -> str:
+def outbound_sent_summary(kind: str, text: str = "", seq: int | None = None) -> str:
     """Summary label for a sent message: text keeps 60 chars, voice/thinking
-    tag+40 chars, other kinds tag only."""
+    tag+40 chars. Other kinds (media) are numbered per reply when `seq` is
+    given — `[{kind} {seq}]` — with the file name (if any) appended, up to
+    60 chars; without `seq` it's tag only, `[{kind}]`."""
     if kind == "text":
         return text[:60]
     if kind in ("voice", "thinking"):
         return f"[{kind}] {text[:40]}"
-    return f"[{kind}]"
+    tag = f"[{kind} {seq}]" if seq is not None else f"[{kind}]"
+    return f"{tag} {text[:60]}" if text else tag
