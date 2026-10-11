@@ -38,14 +38,15 @@ Requires [marrow](https://github.com/Jaynechu/marrow) installed separately.
 - `[bark] push_url` — optional: Bark device URL (https://github.com/Finb/Bark).
   When set, each assistant reply fires a push notification to the device.
   `icon` (image URL) and `max_chars` (body truncation, default 150) are optional.
-- `[tg] reaction_events` — Telegram emoji reactions, private chat only (default
-  true). When the user reacts to a message, the model gets a
+- `[tg] reaction_events` — inbound Telegram emoji reactions, private chat only
+  (default true). When the user reacts to a message, the model gets a
   `[reaction +X -Y] on ...` line and may reply, react back, or stay silent.
-  To react back, the model puts `<react>EMOJI</react>` in its reply (reacts
-  to the last message of the batch) or `<react to="FRAGMENT">EMOJI</react>`
-  (reacts to the newest message containing FRAGMENT); the tag is stripped
-  before sending. Setting `reaction_events = false` only stops the inbound
-  event line — outbound `<react>` tags still work.
+  To react, the model puts `<react>EMOJI</react>` in its reply (reacts to the
+  last message of the batch) or `<react to="FRAGMENT">EMOJI</react>` (reacts
+  to the newest message containing FRAGMENT; in groups FRAGMENT may be a
+  sender's name); the tag is stripped before sending. Outbound `<react>`
+  works in the private chat and in groups, and is unaffected by
+  `reaction_events = false`.
 
 ## Commands
 
