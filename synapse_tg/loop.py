@@ -233,19 +233,22 @@ TG_BUBBLE_FORMAT_PROMPT = (
 
 
 TG_REACTION_PROMPT = (
-    "Emoji reactions (Telegram private chat only). When the user reacts you "
-    "get a line like '[reaction +❤ -\U0001f44d] on your message: \"...\"' "
-    "(+ added, - removed); reply, react back, or stay silent as you see fit. "
-    "To react to the user's messages put <react>EMOJI</react> anywhere in "
-    "your reply: it lands on the user's last message in the batch you are "
-    "answering. <react to=\"FRAGMENT\">EMOJI</react> lands on the newest "
-    "user message containing FRAGMENT; media are recorded as [photo] "
-    "[sticker] [gif] [video] [file], so to=\"[sticker]\" hits the newest "
-    "sticker. One reaction per message; a newer one replaces the older; "
-    "several tags may target different messages. If this batch has no new "
-    "user message (e.g. it is only a reaction event), a bare <react> has no "
-    "target and is dropped — use to=\"FRAGMENT\" to pick a message. Tags are "
-    "stripped before sending. Only these emoji work: "
+    "Emoji reactions work in private chats and groups. In a private chat, "
+    "when the user reacts to your message you get a line like "
+    "'[reaction +❤ -\U0001f44d] on your message: \"...\"' (+ added, - "
+    "removed); reply, react back, or stay silent as you see fit — groups "
+    "never send this event line, even when someone reacts. "
+    "To react back, put <react>EMOJI</react> anywhere in your reply: it "
+    "lands on the last message of the batch you are answering, in that "
+    "chat. <react to=\"FRAGMENT\">EMOJI</react> lands on the newest message "
+    "containing FRAGMENT; in a group FRAGMENT can be a sender's name. "
+    "Media are recorded as [photo] [sticker] [gif] [video] [file], so "
+    "to=\"[sticker]\" hits the newest sticker. One reaction per message; a "
+    "newer one replaces the older; several tags may target different "
+    "messages. If the batch has no new message (e.g. only a reaction "
+    "event), a bare <react> has no target and is dropped — use "
+    "to=\"FRAGMENT\" to pick a message. Tags are stripped before sending. "
+    "Only these emoji work: "
     + " ".join(reactions.ALLOWED_REACTION_EMOJI)
     + "."
 )
@@ -327,16 +330,21 @@ class TgLoop:
             )
         self._user_initiated_close = False
         self._msg_id_cache: collections.OrderedDict[int, str] = collections.OrderedDict()
-        # Reactions (private chat only): her messages (id -> summary, cap
-        # 200), our sent messages (id -> summary, cap 300), and the id of her
-        # last private message — the default <react> target.
+        # Reactions. Private: her messages (id -> summary, cap 200), our sent
+        # messages (id -> summary, cap 300), last private message id (default
+        # <react> target). Group: same per-group (name-prefixed summary, cap
+        # 200/group); outbound reactions only — no inbound events in groups.
         self._private_msgs: collections.OrderedDict[int, str] = collections.OrderedDict()
         self._sent_msgs: collections.OrderedDict[int, str] = collections.OrderedDict()
         self._last_private_msg_id: int | None = None
-        # _last_private_msg_id as of the last private flush — lets _flush_one
-        # tell "a new user message arrived in this batch" from "this batch is
-        # only a reaction event (or similar) on an unchanged pointer".
+        self._group_msgs: dict[int, collections.OrderedDict[int, str]] = {}
+        self._last_group_msg_id: dict[int, int] = {}
+        # Last-flushed pointer per origin — lets _flush_one tell "a new user
+        # message arrived in this batch" from "this batch is only a reaction
+        # event (or similar) on an unchanged pointer" (private: one value;
+        # group: one per chat_id).
         self._last_flushed_private_id: int | None = None
+        self._last_flushed_group_id: dict[int, int | None] = {}
         # Routing: private messages use _buffer (accessed via _private_buffer
         # property); each group chat gets its own InboundBuffer so private and
         # group content never merge in one debounce window (bug 2) and routing
@@ -1211,17 +1219,26 @@ class TgLoop:
             if self._state.chat_id != chat_id:
                 self._state.chat_id = chat_id
                 self._persist_state()
-        # Reaction target tracking: private only (never a group message_id —
-        # it would collide with a same-numbered private message). Recorded
-        # even when count_activity is False (a slash command still exists
-        # as a message to react to), but it only becomes the default
-        # <react> target when it actually reached the LLM.
+        # Reaction target tracking, scoped to its own chat (a group's
+        # message_id can collide with a private or another group's).
+        # Recorded even when count_activity is False (e.g. a slash command
+        # still exists as a message to react to), but only becomes the
+        # default <react> target once it actually reached the LLM.
         if msg is not None and not is_group:
             self._private_msgs[msg.message_id] = _inbound_summary(msg)
             if len(self._private_msgs) > 200:
                 self._private_msgs.popitem(last=False)
             if count_activity:
                 self._last_private_msg_id = msg.message_id
+        elif msg is not None and is_group:
+            gmsgs = self._group_msgs.setdefault(chat_id, collections.OrderedDict())
+            user = getattr(msg, "from_user", None)
+            name = user.first_name if user else "?"
+            gmsgs[msg.message_id] = f"{name}: {_inbound_summary(msg)}"
+            if len(gmsgs) > 200:
+                gmsgs.popitem(last=False)
+            if count_activity:
+                self._last_group_msg_id[chat_id] = msg.message_id
         # An inbound message restarts the cortex shell's silence cycle and
         # cancels a booked wake only when it actually reaches the LLM. Text
         # turns count a "forward" verdict or an injected rewrite; anything the
@@ -1559,15 +1576,10 @@ class TgLoop:
         trigger_msg_id: int | None,  # or NO_DEFAULT_REACT_TARGET — see loop.py constant
         tags: list[reactions.ReactTag],
     ) -> None:
-        """Apply <react> tags extracted from a reply. Private chat only —
-        Telegram group/supergroup/channel chat ids are always negative; a
-        positive chat_id is a private chat (it equals the user's own id)."""
-        if chat_id < 0:
-            logger.warning(
-                "react: %d tag(s) dropped — reply target is a group chat (chat_id=%s)",
-                len(tags), chat_id,
-            )
-            return
+        """Apply <react> tags extracted from a reply, private chat or group
+        (Telegram group/supergroup chat ids are always negative)."""
+        is_group = chat_id < 0
+        msgs = self._group_msgs.get(chat_id, {}) if is_group else self._private_msgs
 
         async def _set_one(target: int, emoji: str) -> bool:
             attempts = max(1, self._cfg.send_retry_max)
@@ -1596,10 +1608,12 @@ class TgLoop:
             default_id = None  # bare <react> is unresolved below; to="..." still works
         elif trigger_msg_id is not None:
             default_id = trigger_msg_id
+        elif is_group:
+            default_id = self._last_group_msg_id.get(chat_id)
         else:
             default_id = self._last_private_msg_id
         for pending in reactions.resolve_reaction_targets(
-            tags, default_msg_id=default_id, private_msgs=self._private_msgs
+            tags, default_msg_id=default_id, private_msgs=msgs
         ):
             if pending.target is None:
                 logger.warning(
@@ -1638,16 +1652,22 @@ class TgLoop:
         if not body:
             return
         # Snapshot now: a default-target <react> in this turn's reply must
-        # land on the last message of THIS batch, even if she sends another
-        # message (updating _last_private_msg_id) while the turn is running.
-        trigger_msg_id = self._last_private_msg_id
+        # land on the last message of THIS batch, even if a new one arrives
+        # (updating the pointer below) while the turn is running. Unchanged
+        # since this origin's last flush -> no new user message in this
+        # batch (e.g. only a reaction event): no default target, so a bare
+        # <react> must not land on an old message.
         if buf is self._private_buffer:
-            # Unchanged since the last private flush -> this batch has no
-            # new user message (e.g. only a reaction event): no default
-            # target, so a bare <react> must not land on her last message.
+            trigger_msg_id = self._last_private_msg_id
             if trigger_msg_id == self._last_flushed_private_id:
                 trigger_msg_id = NO_DEFAULT_REACT_TARGET
             self._last_flushed_private_id = self._last_private_msg_id
+        else:
+            last_group_id = self._last_group_msg_id.get(chat_id)
+            trigger_msg_id = last_group_id
+            if trigger_msg_id == self._last_flushed_group_id.get(chat_id):
+                trigger_msg_id = NO_DEFAULT_REACT_TARGET
+            self._last_flushed_group_id[chat_id] = last_group_id
 
         logger.info("flush: %r", body[:120])
         typing = TypingAction(bot, chat_id)
@@ -1901,9 +1921,10 @@ class TgLoop:
 
         `trigger_msg_id`: default <react> target, snapshotted by the caller
         right after its inbound batch was taken. None (every caller except
-        _flush_one) falls back to the live _last_private_msg_id.
-        NO_DEFAULT_REACT_TARGET (_flush_one only): the batch had no new user
-        message — a bare <react> is unresolved; to="..." still works."""
+        _flush_one) falls back to the live last-message pointer for chat_id
+        (private or group). NO_DEFAULT_REACT_TARGET (_flush_one only): the
+        batch had no new user message — a bare <react> is unresolved;
+        to="..." still works."""
         if not response and not thinking:
             return
         # HTML-comment silence protocol: strip all <!-- ... --> before delivering.

@@ -469,6 +469,9 @@ def test_group_message_does_not_enter_private_msgs(tmp_path):
     asyncio.run(loop.on_message(update, _FakeCtx(bot)))
     assert 16 not in loop._private_msgs
     assert loop._last_private_msg_id is None
+    # ... and lands in its own group's ledger, name-prefixed like _chat_meta.
+    assert loop._group_msgs[-100123][16] == "Her: !ask hi"
+    assert loop._last_group_msg_id[-100123] == 16
 
 
 def test_private_msgs_cap_200(tmp_path):
@@ -710,15 +713,15 @@ def test_apply_reactions_retry_after_over_cap_skips_no_sleep(tmp_path, monkeypat
     assert slept == []
 
 
-def test_deliver_reply_group_target_strips_tag_no_react(tmp_path):
-    """Group chat_ids are always negative in Telegram — the guard is a
-    plain sign check, independent of _group_buffers state."""
+def test_deliver_reply_group_target_applies_with_explicit_trigger(tmp_path):
+    """Groups take outbound reactions too — a bare <react> with an explicit
+    trigger_msg_id lands there exactly like it would in a private chat."""
     loop = _owner_loop(tmp_path)
     bot = _ReactBot()
     asyncio.run(
         loop._deliver_reply(bot, -100123, "<react>❤</react>hi", "", trigger_msg_id=55)
     )
-    assert bot.reactions == []
+    assert bot.reactions == [(-100123, 55, [ReactionTypeEmoji("❤")])]
     assert any(c["text"] == "hi" for c in bot.sent)
 
 
@@ -778,12 +781,9 @@ def test_flush_one_snapshots_trigger_before_turn_runs(tmp_path, monkeypatch):
     """Integration: _flush_one must snapshot _last_private_msg_id right after
     buf.flush() and carry it through to _deliver_reply, even if the turn
     updates _last_private_msg_id while running."""
-    from synapse_core.debounce import InboundBuffer
-
     loop = _owner_loop(tmp_path)
     loop._last_private_msg_id = 42  # the batch's last message
-    buf = InboundBuffer(clock=lambda: 1000.0)
-    buf.add("hi")
+    loop._private_buffer.add("hi")
     bot = _ReactBot()
     loop._bot = bot
 
@@ -801,7 +801,7 @@ def test_flush_one_snapshots_trigger_before_turn_runs(tmp_path, monkeypatch):
 
     monkeypatch.setattr("synapse_tg.loop.asyncio.to_thread", _immediate)
 
-    asyncio.run(loop._flush_one(bot, 777, buf))
+    asyncio.run(loop._flush_one(bot, 777, loop._private_buffer))
     assert bot.reactions == [(777, 42, [ReactionTypeEmoji("❤")])]
 
 
@@ -870,6 +870,56 @@ def test_deliver_reply_non_flush_caller_unaffected_by_flush_tracker(tmp_path):
     bot = _ReactBot()
     asyncio.run(loop._deliver_reply(bot, 777, "<react>❤</react>hi", ""))
     assert bot.reactions == [(777, 777, [ReactionTypeEmoji("❤")])]
+
+
+# ── group outbound reactions ────────────────────────────────────────────────
+
+
+def test_flush_group_default_target_is_batch_last_message(tmp_path, monkeypatch):
+    loop = _owner_loop(tmp_path)
+    gbuf = loop._buf_for(-100123, is_group=True)
+    loop._last_group_msg_id[-100123] = 50
+    gbuf.add("hi")
+    bot = _ReactBot()
+    loop._bot = bot
+    _mock_turn(loop, monkeypatch, "<react>\U0001f525</react>ok")
+
+    asyncio.run(loop._flush_one(bot, -100123, gbuf))
+    assert bot.reactions == [(-100123, 50, [ReactionTypeEmoji("\U0001f525")])]
+
+
+def test_flush_group_to_name_fragment_hits(tmp_path, monkeypatch):
+    """to="NAME" matches the name _chat_meta rendered into the group
+    prefix — the group summary is "name: ..."."""
+    loop = _owner_loop(tmp_path)
+    loop._group_msgs[-100123] = {50: "Luna: pizza night"}
+    gbuf = loop._buf_for(-100123, is_group=True)
+    gbuf.add("hi")
+    bot = _ReactBot()
+    loop._bot = bot
+    _mock_turn(loop, monkeypatch, '<react to="Luna">\U0001f44d</react>ok')
+
+    asyncio.run(loop._flush_one(bot, -100123, gbuf))
+    assert bot.reactions == [(-100123, 50, [ReactionTypeEmoji("\U0001f44d")])]
+
+
+def test_two_groups_do_not_cross_contaminate(tmp_path):
+    """Same message_id, two different groups — a to= search in one group
+    must never match the other group's ledger."""
+    loop = _owner_loop(tmp_path)
+    loop._group_msgs[-100] = {1: "Luna: hello"}
+    loop._group_msgs[-200] = {1: "Mira: hello"}
+    bot = _ReactBot()
+
+    asyncio.run(
+        loop._deliver_reply(bot, -200, '<react to="Luna">❤</react>ok', "", trigger_msg_id=1)
+    )
+    assert bot.reactions == []  # -200 has no "Luna" entry
+
+    asyncio.run(
+        loop._deliver_reply(bot, -100, '<react to="Luna">❤</react>ok', "", trigger_msg_id=1)
+    )
+    assert bot.reactions == [(-100, 1, [ReactionTypeEmoji("❤")])]
 
 
 # ── _translate_thinking_in_place: _sent_msgs bookkeeping ────────────────────
