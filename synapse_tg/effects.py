@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import re
 
-# Bot API 7.4 free message effects: emoji -> effect_id. Verified against the
-# live Bot API; the heart entry is the bare glyph (no U+FE0F), matching how
+# Bot API 7.4 free message effects: emoji -> effect_id. Cross-checked against
+# several open-source bots; the heart entry is the bare glyph (no U+FE0F), matching how
 # Telegram's own reaction whitelist represents it.
 EFFECT_IDS: dict[str, str] = {
     "\U0001f525": "5104841245755180586",  # 🔥
