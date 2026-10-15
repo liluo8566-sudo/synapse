@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import subprocess
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 _CJK_RE = re.compile(r"[一-鿿぀-ヿ가-힯]")
 _LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+_THINKING_BUDGET = 2048
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a translation engine embedded in a private messaging bridge. "
@@ -153,6 +155,7 @@ def default_translate_cmd(claude_bin: str, model: str, system_prompt: str = "") 
     cmd = [
         claude_bin, "-p", "--model", model,
         "--setting-sources", "", "--strict-mcp-config",
+        "--settings", json.dumps({"env": {"MAX_THINKING_TOKENS": str(_THINKING_BUDGET)}}),
     ]
     if system_prompt:
         cmd += ["--system-prompt", system_prompt]

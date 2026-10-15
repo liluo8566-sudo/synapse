@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from unittest.mock import AsyncMock
 
@@ -80,6 +81,13 @@ def test_default_translate_cmd_no_system_prompt() -> None:
 def test_default_translate_cmd_with_system_prompt() -> None:
     cmd = default_translate_cmd("claude", "haiku", DEFAULT_SYSTEM_PROMPT)
     assert cmd[-2:] == ["--system-prompt", DEFAULT_SYSTEM_PROMPT]
+
+
+def test_default_translate_cmd_caps_thinking_budget() -> None:
+    cmd = default_translate_cmd("claude", "haiku")
+    assert "--settings" in cmd
+    settings = json.loads(cmd[cmd.index("--settings") + 1])
+    assert settings == {"env": {"MAX_THINKING_TOKENS": "2048"}}
 
 
 # ── translate() ───────────────────────────────────────────────────────
