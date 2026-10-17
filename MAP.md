@@ -50,7 +50,7 @@ Runtimes: bridge (launchd, single process) · cc subprocess (persistent, swap = 
 ## 3. Inbound
 
 - Shared: InboundBuffer → time_anchor → channel_marker [channel: xx] per prompt.
-- [tg] python-telegram-bot Update handler — text, voice, photo, document, video, sticker. File API download to tmp. Voice OGG → cc transcribe. Sticker webp materialize. Quote: native reply_to_message → [quoting: "..."].
+- [tg] python-telegram-bot Update handler — text, photo, document, video, sticker. File API download to tmp. Sticker webp materialize. Quote: native reply_to_message → [quoting: "..."]. Voice: no transcription — a voice update only produces a buffered line when it is a forwarded copy of one of the bot's own TTS sends, recognised via `voice_ledger.py`'s sent-voice ledger (`<data_dir>/sent_voices.jsonl`, keyed by file_unique_id / send date); every other voice (hers, anyone else's) is silently dropped.
 - [wx] ILink.poll_messages (1s, retry-wrapped). Cursor atomic tmp+rename. Media: AES-128-ECB decrypt (3 key-shape fallbacks). PDF >20p: pdftotext → markitdown. Sticker caption routing: 0=suppress, 1=sticker-save, 1+text=ingest. Quote: iLink reference → [quoting: "..."].
 
 ## 4. Outbound
@@ -128,7 +128,7 @@ Runtimes: bridge (launchd, single process) · cc subprocess (persistent, swap = 
 
 ## 10. Config and paths
 
-- Data dir: ~/.config/synapse-{tg,wx}/ (alerts, health, sessions.json, bridge_state.json).
+- Data dir: ~/.config/synapse-{tg,wx}/ (alerts, health, sessions.json, bridge_state.json). [tg] also sent_voices.jsonl (sent-voice ledger, §3).
 - Logs: ~/Library/Logs/synapse-{tg,wx}.{out,err}.log.
 - Config: config.toml per channel (defaults in config.py). Template → config.toml.example.
 - Auth: [tg] bot token in config. [wx] iLink QR → token.json.

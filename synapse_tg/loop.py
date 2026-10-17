@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from telegram import Bot, Message, ReactionTypeEmoji, Update
+from telegram import Bot, Message, MessageOriginUser, ReactionTypeEmoji, Update
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import ContextTypes
 
@@ -49,6 +49,7 @@ from .media.outbound import send_media
 from . import bark as _bark
 from . import effects
 from . import reactions
+from . import voice_ledger
 from .shell import _tzinfo
 from .split import pack_for_tg, split_for_tg_typed
 from . import tts as _tts
@@ -156,6 +157,8 @@ def _inbound_summary(msg) -> str:
         return reactions.inbound_media_summary("gif", caption=caption)
     if getattr(msg, "video", None):
         return reactions.inbound_media_summary("video", caption=caption)
+    if getattr(msg, "voice", None):
+        return reactions.inbound_media_summary("voice", caption=caption)
     document = getattr(msg, "document", None)
     if document:
         return reactions.inbound_media_summary(
@@ -330,6 +333,7 @@ class TgLoop:
         self._pending_chat_id: int | None = None
         self._bot: Bot | None = None
         self._state_path = cfg.data_dir / "bridge_state.json"
+        self._voice_ledger_path = cfg.data_dir / "sent_voices.jsonl"
         self._tz = _tzinfo(cfg.timezone)
         self._state = self._load_state()
         if self._state.chat_id is not None:
@@ -1450,6 +1454,61 @@ class TgLoop:
             self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
             logger.debug("buffered video: %s", path)
 
+    async def on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Recognise only a forwarded copy of one of OUR OWN TTS voice
+        messages — no speech-to-text, no handling of anyone else's voice
+        (hers included). "Ours" = a sent-voice ledger hit on file_unique_id
+        (covers hidden-sender forwards too), or a forward_origin that names
+        this bot as the original sender (covers voices sent before the
+        ledger existed, falling back to a ledger lookup by origin date)."""
+        if update.message is None or not update.message.voice:
+            return
+        msg = update.message
+        is_group = msg.chat.type in ("group", "supergroup")
+        if is_group and not self._check_group_gate(msg):
+            return
+        entry = voice_ledger.lookup(
+            self._voice_ledger_path, file_unique_id=msg.voice.file_unique_id
+        )
+        origin = getattr(msg, "forward_origin", None)
+        bot_origin = (
+            isinstance(origin, MessageOriginUser)
+            and getattr(origin.sender_user, "id", None) == context.bot.id
+        )
+        if entry is None and bot_origin:
+            origin_date = getattr(origin, "date", None)
+            if origin_date is not None:
+                entry = voice_ledger.lookup(
+                    self._voice_ledger_path, date=int(origin_date.timestamp())
+                )
+        if entry is None and not bot_origin:
+            logger.debug("on_voice: not ours (chat=%s)", msg.chat_id)
+            return
+        self._track(context.bot, msg.chat_id, is_group=is_group, msg=msg)
+        cmeta = _chat_meta(msg, self._cfg.group_meta_template, self._cfg.private_meta_template)
+        caption = (msg.caption or "").strip()
+        if entry is not None:
+            ts = entry.get("date")
+            when = (
+                datetime.fromtimestamp(ts, self._tz).strftime("%m-%d %H:%M")
+                if ts is not None else "?"
+            )
+            text = entry.get("text", "")
+            line = f'[forwarded your own voice message, originally sent {when}: "{text}"]'
+        else:
+            origin_date = getattr(origin, "date", None)
+            when = (
+                datetime.fromtimestamp(int(origin_date.timestamp()), self._tz).strftime("%m-%d %H:%M")
+                if origin_date is not None else "?"
+            )
+            line = (
+                f"[forwarded your own voice message, originally sent {when}; "
+                "its text is not in the voice ledger]"
+            )
+        body = f"{caption}\n{line}" if caption else line
+        self._buf_for(msg.chat_id, is_group).add(f"{cmeta}{body}" if cmeta else body)
+        logger.info("on_voice: matched (chat=%s, ledger_hit=%s)", msg.chat_id, entry is not None)
+
     async def on_reaction(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Private-chat-only: she added/removed/swapped a reaction on some
         message. Turns it into one event line on the private buffer so the
@@ -2042,6 +2101,7 @@ class TgLoop:
                         )
                         if sent is not None:
                             self._record_sent(sent.message_id, "voice", voice_text)
+                            voice_ledger.record(self._voice_ledger_path, sent, voice_text)
                     finally:
                         try:
                             import os as _os

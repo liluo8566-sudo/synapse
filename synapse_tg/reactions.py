@@ -154,7 +154,7 @@ def format_reaction_event(
 
 
 def inbound_media_summary(kind: str, *, emoji: str = "", filename: str = "", caption: str = "") -> str:
-    """Summary label for an inbound message: kind is photo/sticker/gif/video/file."""
+    """Summary label for an inbound message: kind is photo/sticker/gif/video/voice/file."""
     if kind == "sticker":
         tag = f"[sticker] {emoji}" if emoji else "[sticker]"
     elif kind == "file":

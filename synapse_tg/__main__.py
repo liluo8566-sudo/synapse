@@ -385,6 +385,7 @@ def main() -> int:
     app.add_handler(MessageHandler(_gated(filters.Document.ALL), loop.on_document))
     app.add_handler(MessageHandler(_gated(filters.Sticker.ALL), loop.on_sticker))
     app.add_handler(MessageHandler(_gated(filters.VIDEO), loop.on_video))
+    app.add_handler(MessageHandler(_gated(filters.VOICE), loop.on_voice))
     # Filtered inside on_reaction (private + owner only) — anonymous count
     # updates (no .user/.old_reaction) are excluded at the handler level.
     app.add_handler(
